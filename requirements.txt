@@ -1,0 +1,22 @@
+# Dependencies for Python 3.10.0
+# Machine Learning & Deep Learning
+torch>=2.0.0
+numpy<2.0,>=1.26.4      # PyTorch 2.3 official wheel built with NumPy 1.x
+
+# Data Processing & Analysis
+pandas>=1.3.0
+
+# Visualization
+matplotlib>=3.5.0
+
+# Progress Display
+tqdm>=4.62.0
+
+# Logging & Monitoring
+tensorboard>=2.0.0
+
+# Optimization (Linear Programming)
+pulp>=2.7
+
+# Standard Libraries (included in Python 3.10.0)
+# os, sys, math, random, datetime, traceback, signal, subprocess, threading, webbrowser, time, csv, glob
