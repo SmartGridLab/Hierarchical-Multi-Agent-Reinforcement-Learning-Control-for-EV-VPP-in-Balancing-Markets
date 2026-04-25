@@ -1,6 +1,9 @@
 # Hierarchical Multi-Agent Reinforcement Learning Control for EV-VPP in Balancing Markets
+This repository contains the official implementation of the paper:
 
-This repository contains the implementation of a hierarchical multi-agent RL framework for controlling EV charging/discharging as a virtual power plant (VPP) in balancing markets.
+> **Hierarchical-Multi-Agent-Reinforcement-Learning-Control-for-EV-VPP-in-Balancing-Markets**  
+> *Author: Koshin Hayashi, Sihui Xue, Daisuke Kodaira*  
+> *Submitted to IEEE Access*
 
 ## 📝 Abstract
 
@@ -71,3 +74,11 @@ To switch methods, update the boolean flags in `Config.py` (e.g., `USE_MILP`, `U
 
 - Results and logs are generated during training and can be visualized via utilities under `tools/`.
 - For reproducible experiments, keep seeds and flags fixed in `Config.py`.
+
+
+@article{Hayashi2026EVVPP,
+  title={Hierarchical Multi-Agent Reinforcement Learning Control for EV-VPP in Balancing Markets},
+  author={Hayashi, Koshin and Xue, Sihui and Kodaira, Daisuke},
+  journal={Submitted to IEEE Access},
+  year={2026}
+}
