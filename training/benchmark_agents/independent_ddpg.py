@@ -1,7 +1,12 @@
 
-"Documentation."
+"""
 
-import os 
+
+
+- IndependentDDPG(s_dim, max_evs_per_station, n_agent, ...)
+"""
+
+import os
 import time 
 import torch ._dynamo 
 torch ._dynamo .config .suppress_errors =True 
@@ -26,9 +31,7 @@ MAX_EV_PER_STATION ,
 )
 from environment.observation_config import (
 EV_FEAT_DIM ,
-LOCAL_USE_STATION_POWER ,
-LOCAL_DEMAND_STEPS ,
-LOCAL_USE_STEP ,
+LOCAL_TAIL_DIM ,
 )
 
 from training.Agent.actor import Actor 
@@ -40,14 +43,12 @@ device =torch .device ("cuda"if torch .cuda .is_available ()else "cpu")
 
 
 class IndependentDDPG :
-    "Documentation."
 
     def __init__ (self ,s_dim ,max_evs_per_station ,n_agent ,
     gamma =GAMMA ,tau =TAU ,batch =BATCH_SIZE ,
     lr_a =LR_ACTOR ,lr_c =LR_CRITIC_LOCAL ,
     num_episodes =10000 ,
     smoothl1_beta =SMOOTHL1_BETA ):
-        "Documentation."
         if max_evs_per_station !=MAX_EV_PER_STATION :
             raise AssertionError (
             f"max_evs_per_station={max_evs_per_station} != Config.MAX_EV_PER_STATION={MAX_EV_PER_STATION}. "
@@ -129,11 +130,7 @@ class IndependentDDPG :
         self .ev_state_dim =EV_FEAT_DIM 
         self .max_evs =max_evs_per_station 
         
-        self .local_tail_dim =(
-        (1 if LOCAL_USE_STATION_POWER else 0 )
-        +int (LOCAL_DEMAND_STEPS )
-        +(1 if LOCAL_USE_STEP else 0 )
-        )
+        self .local_tail_dim =LOCAL_TAIL_DIM
         self .station_state_dim =self .ev_state_dim *self .max_evs +self .local_tail_dim 
 
         
@@ -207,7 +204,7 @@ class IndependentDDPG :
         self .global_reward_weight =GLOBAL_REWARD_WEIGHT 
 
     def update_active_evs (self ,env ):
-        "Documentation."
+        """Synchronize active EV-slot counts from the environment mask."""
         num_stations =min (self .n ,env .num_stations )
         self .active_evs =[0 ]*self .n 
 
@@ -218,14 +215,14 @@ class IndependentDDPG :
         self .env =env 
 
     def _with_id (self ,state_batch ,agent_idx ):
-        "Documentation."
+        """Prepend a one-hot station identifier to a station observation batch."""
         B =state_batch .size (0 )
         oh =torch .zeros (B ,self .id_dim ,device =state_batch .device ,dtype =state_batch .dtype )
         oh [:,agent_idx ]=1.0 
         return torch .cat ([oh ,state_batch ],dim =-1 )
 
     def act (self ,state ,env =None ,noise =True ):
-        "Documentation."
+        """Return one action vector per station using independent actors."""
         
         if hasattr (self ,'test_mode')and self .test_mode :
             noise =False 
@@ -266,7 +263,7 @@ class IndependentDDPG :
         return tensor_actions 
 
     def update (self ):
-        "Documentation."
+        """Run one Independent-DDPG critic/actor update from replay."""
         
         if hasattr (self ,'test_mode')and self .test_mode :
             self .last_actor_loss =0.0 
@@ -366,22 +363,22 @@ class IndependentDDPG :
         self .update_step +=1 
 
     def _soft_update (self ,target ,source ):
-        "Documentation."
+        """Polyak-average one target network toward its online network."""
         for target_param ,param in zip (target .parameters (),source .parameters ()):
             target_param .data .copy_ (
             target_param .data *(1.0 -self .tau )+param .data *self .tau 
             )
 
     def cache_experience (self ,s ,s_ ,delta_soc ,r_local ,r_global ,done ,actual_station_powers ):
-        "Documentation."
+        """Store a transition in replay memory."""
         self .buf .cache (s ,s_ ,delta_soc ,r_local ,r_global ,done ,actual_station_powers )
 
     def set_test_mode (self ,mode :bool ):
-        "Documentation."
+        """Enable or disable deterministic evaluation mode."""
         self .test_mode =bool (mode )
 
     def episode_start (self ):
-        "Documentation."
+        """Advance exploration schedules at the start of an episode."""
         self .episode_local_q_values =[]
         
         if not self .test_mode :
@@ -411,11 +408,11 @@ class IndependentDDPG :
                 pass 
 
     def episode_end (self ):
-        "Documentation."
+        """No-op episode hook kept for the common agent interface."""
         pass 
 
     def save_models (self ,path ,episode ):
-        "Documentation."
+        """Save actor and critic checkpoints for every station."""
         import os 
         os .makedirs (path ,exist_ok =True )
 
@@ -426,7 +423,7 @@ class IndependentDDPG :
             os .path .join (path ,f"critic_{i}_ep{episode}.pth"))
 
     def load_models (self ,path ,episode ):
-        "Documentation."
+        """Load actor and critic checkpoints and sync target networks."""
         for i in range (self .n ):
             self .actors [i ].load_state_dict (
             torch .load (os .path .join (path ,f"actor_{i}_ep{episode}.pth")))
@@ -438,7 +435,7 @@ class IndependentDDPG :
             self .t_critics [i ].load_state_dict (self .critics [i ].state_dict ())
 
     def save_actors (self ,path ,episode ):
-        "Documentation."
+        """Save actor checkpoints for every station."""
         import os ,torch 
         os .makedirs (path ,exist_ok =True )
         for i in range (self .n ):
@@ -446,7 +443,7 @@ class IndependentDDPG :
             os .path .join (path ,f"actor_{i}_ep{episode}.pth"))
 
     def load_actors (self ,path ,episode ,map_location =None ):
-        "Documentation."
+        """Load actor checkpoints and sync target actors."""
         import os ,torch 
         for i in range (self .n ):
             sd =torch .load (os .path .join (path ,f"actor_{i}_ep{episode}.pth"),

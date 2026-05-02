@@ -1,10 +1,25 @@
 
-
 """
-可視化・グラフ描画ユーティリティモジュール。
+Plotting, TensorBoard, and experiment-output utilities.
 
-学習曲線・性能メトリクス・EV SoC推移・到着数など各種グラフを生成しPNG/CSVで保存する。
-TensorBoardへのQ値・勾配ノルム記録クラス (GradientLossVisualizer) も提供する。
+This module centralizes artifacts that are produced during training,
+checkpoint evaluation, and runtime execution:
+- reward and performance CSV/PNG summaries;
+- station-level power cooperation plots;
+- EV-level SoC trajectory plots;
+- demand-tracking mismatch and reward-decomposition diagnostics;
+- TensorBoard scalar writers for reward, Q-value, gradient, loss, clipping, and
+  replay/exploration state;
+- archive snapshots of source code for reproducibility.
+
+Data conventions:
+- `all_episode_data` maps episode index -> per-step series. Common keys are
+  `ag_requests`, `total_ev_transport`, `actual_ev{station}`, `soc_data`,
+  `arrivals_per_step`, and reward component arrays.
+- `performance_metrics` stores one list per metric, aligned by episode or
+  checkpoint index.
+- Plot functions always write CSV outputs where practical, so paper/review
+  figures can be regenerated or audited without reading PNG pixels.
 """
 
 import os
@@ -14,17 +29,17 @@ import warnings
 import numpy as np
 import matplotlib
 matplotlib .use ("Agg")
-import matplotlib .pyplot as plt 
-import matplotlib as mpl 
+import matplotlib .pyplot as plt
+import matplotlib as mpl
 
 
 warnings .filterwarnings ("ignore",category =UserWarning ,module ="matplotlib")
 warnings .filterwarnings ("ignore",message ="Glyph .* missing from font")
-import logging 
+import logging
 logging .getLogger ('matplotlib.font_manager').setLevel (logging .ERROR )
 logging .getLogger ('matplotlib.ticker').setLevel (logging .ERROR )
 
-from torch .utils .tensorboard import SummaryWriter 
+from torch .utils .tensorboard import SummaryWriter
 from Config import (
 TOL_NARROW_METRICS ,
 POWER_TO_ENERGY ,
@@ -35,18 +50,18 @@ NUM_STATIONS ,
 
 mpl .rcParams ['font.family']='sans-serif'
 mpl .rcParams ['font.sans-serif']=['Arial','Helvetica','Liberation Sans','FreeSans','sans-serif']
-mpl .rcParams ['font.size']=30 
-mpl .rcParams ['axes.titlesize']=36 
-mpl .rcParams ['axes.labelsize']=30 
-mpl .rcParams ['xtick.labelsize']=24 
-mpl .rcParams ['ytick.labelsize']=24 
-mpl .rcParams ['legend.fontsize']=24 
-mpl .rcParams ['lines.linewidth']=3.0 
-mpl .rcParams ['axes.linewidth']=3.0 
-mpl .rcParams ['grid.linewidth']=1.5 
-mpl .rcParams ['path.simplify']=True 
-mpl .rcParams ['path.simplify_threshold']=0.5 
-mpl .rcParams ['agg.path.chunksize']=10000 
+mpl .rcParams ['font.size']=30
+mpl .rcParams ['axes.titlesize']=36
+mpl .rcParams ['axes.labelsize']=30
+mpl .rcParams ['xtick.labelsize']=24
+mpl .rcParams ['ytick.labelsize']=24
+mpl .rcParams ['legend.fontsize']=24
+mpl .rcParams ['lines.linewidth']=3.0
+mpl .rcParams ['axes.linewidth']=3.0
+mpl .rcParams ['grid.linewidth']=1.5
+mpl .rcParams ['path.simplify']=True
+mpl .rcParams ['path.simplify_threshold']=0.5
+mpl .rcParams ['agg.path.chunksize']=10000
 
 
 
@@ -60,7 +75,13 @@ performance_metrics =None ,
 title_prefix :str ="",
 skip_png :bool =False ,
 x_values =None ):
-    "Documentation."
+    """
+    Save reward curves and the corresponding reward CSV.
+
+    `local_rewards` is the station-averaged local objective, while
+    `global_rewards` is the demand-tracking objective. When `x_values` is given,
+    the x-axis represents checkpoint episodes rather than dense episode indices.
+    """
 
     base_results_dir =os .path .dirname (results_dir )if "TEST"in os .path .basename (results_dir )else results_dir
     os .makedirs (base_results_dir ,exist_ok =True )
@@ -134,62 +155,69 @@ x_values =None ):
         for i in range (n_local ):
             writer .writerow ([x_ep [i ],local_rewards [i ],global_rewards [i ]])
 
-            
 
 
-            
-            
-            
+
+
+
+
 def plot_performance_metrics (performance_metrics ,results_dir ,title_prefix :str ="",x_values =None ,skip_png :bool =False ):
-    "Documentation."
-    if not performance_metrics or len (performance_metrics .get ('soc_miss_count',[]))==0 :
-        return 
+    """
+    Save the main policy-quality metrics used in the paper-style evaluation.
 
-        
-    base_results_dir =os .path .dirname (results_dir )if "TEST"in os .path .basename (results_dir )else results_dir 
+    SoC performance is plotted as target-SoC satisfaction rate
+    (`100 - soc_miss_count`). Dispatch tracking is reconstructed from surplus
+    and shortage step counts: successful dispatch steps divided by all
+    non-zero-request steps.
+    """
+    if not performance_metrics or len (performance_metrics .get ('soc_miss_count',[]))==0 :
+        return
+
+
+    base_results_dir =os .path .dirname (results_dir )if "TEST"in os .path .basename (results_dir )else results_dir
     os .makedirs (base_results_dir ,exist_ok =True )
 
-    
+
     soc_miss_rates =performance_metrics .get ('soc_miss_count',[])
     avg_switches_list =performance_metrics .get ('avg_switches',[])
 
-    
+
     surplus_steps_list =performance_metrics .get ('surplus_steps',[])
     surplus_within_list =performance_metrics .get ('surplus_within_narrow',[])
     shortage_steps_list =performance_metrics .get ('shortage_steps',[])
     shortage_within_list =performance_metrics .get ('shortage_within_narrow',[])
 
-    
+
     soc_hit_rates =[100 -rate for rate in soc_miss_rates ]
 
-    
+
     dispatch_tracking_rates =[]
     for i in range (len (soc_hit_rates )):
-        s_steps =surplus_steps_list [i ]if i <len (surplus_steps_list )else 0 
-        s_within =surplus_within_list [i ]if i <len (surplus_within_list )else 0 
-        sh_steps =shortage_steps_list [i ]if i <len (shortage_steps_list )else 0 
-        sh_within =shortage_within_list [i ]if i <len (shortage_within_list )else 0 
+        s_steps =surplus_steps_list [i ]if i <len (surplus_steps_list )else 0
+        s_within =surplus_within_list [i ]if i <len (surplus_within_list )else 0
+        sh_steps =shortage_steps_list [i ]if i <len (shortage_steps_list )else 0
+        sh_within =shortage_within_list [i ]if i <len (shortage_within_list )else 0
 
-        denom =s_steps +sh_steps 
-        numer =s_within +sh_within 
-        rate =(numer /denom *100.0 )if denom >0 else 0.0 
+        denom =s_steps +sh_steps
+        numer =s_within +sh_within
+        rate =(numer /denom *100.0 )if denom >0 else 0.0
         dispatch_tracking_rates .append (rate )
 
-        
+
     if x_values is not None :
         x_plot =np .asarray (x_values )
     else :
         episodes =np .arange (1 ,len (soc_hit_rates )+1 )
-        
-        x_plot =episodes 
 
-        
+        x_plot =episodes
+
+
     metrics_filename ="train_performance_metrics.png"
     if title_prefix and ("test" in title_prefix .lower ()):
         metrics_filename ="test_performance_metrics.png"
 
     if not skip_png :
-    
+
         plt .rcParams .update ({
         "font.size":24 ,
         "axes.labelsize":26 ,
@@ -204,7 +232,7 @@ def plot_performance_metrics (performance_metrics ,results_dir ,title_prefix :st
 
         fig ,ax1 =plt .subplots (figsize =(12 ,7 ))
 
-        
+
         soc_line ,=ax1 .plot (x_plot ,soc_hit_rates ,linestyle ="-",linewidth =5 ,
         label ="Target SoC Satisfaction Rate",color =soc_color )
         ax1 .set_xlabel ("Episode")
@@ -213,7 +241,7 @@ def plot_performance_metrics (performance_metrics ,results_dir ,title_prefix :st
         ax1 .set_ylim (0 ,105 )
         ax1 .spines ["left"].set_color (soc_color )
 
-        
+
         ax2 =ax1 .twinx ()
         dt_line ,=ax2 .plot (x_plot ,dispatch_tracking_rates ,linestyle ="-",linewidth =5 ,
         label ="Dispatch Tracking Rate",color =compliance_color )
@@ -222,32 +250,32 @@ def plot_performance_metrics (performance_metrics ,results_dir ,title_prefix :st
         ax2 .set_ylim (0 ,105 )
         ax2 .spines ["right"].set_color (compliance_color )
 
-        
+
         lines =[soc_line ,dt_line ]
         labels =["Target SoC Satisfaction Rate","Dispatch Tracking Rate"]
 
         if len (avg_switches_list )>0 :
             ax3 =ax1 .twinx ()
-            
+
             ax3 .spines ["right"].set_position (("axes",1.15 ))
-            
+
             switch_line ,=ax3 .plot (x_plot ,avg_switches_list ,marker ='o',markersize =15 ,linestyle ='None',
             label ="Avg Switches",color ="green")
             ax3 .set_ylabel ("Avg Switches",color ="green")
             ax3 .tick_params (axis ="y",labelcolor ="green")
-            
+
             max_sw =max (max (avg_switches_list ),10 )
             ax3 .set_ylim (0 ,max_sw +2 )
             ax3 .spines ["right"].set_color ("green")
             lines .append (switch_line )
             labels .append ("Avg Switches")
 
-            
-            
-            
+
+
+
         ax1 .grid (True ,linewidth =0.7 ,alpha =0.7 )
 
-        
+
         if len (x_plot )>10 :
             step =max (1 ,len (x_plot )//10 )
             tick_idx =np .arange (0 ,len (x_plot ),step )
@@ -257,11 +285,11 @@ def plot_performance_metrics (performance_metrics ,results_dir ,title_prefix :st
 
         fig .tight_layout ()
 
-        
+
         fig .savefig (os .path .join (base_results_dir ,metrics_filename ),dpi =140 ,bbox_inches ='tight')
         plt .close (fig )
 
-        
+
         leg_fig ,leg_ax =plt .subplots (figsize =(8 ,3 ))
         leg_ax .axis ("off")
         leg_ax .legend (lines ,labels ,loc ="center",frameon =True )
@@ -270,11 +298,11 @@ def plot_performance_metrics (performance_metrics ,results_dir ,title_prefix :st
         leg_fig .savefig (os .path .join (base_results_dir ,legend_filename ),dpi =140 )
         plt .close (leg_fig )
 
-        
+
     csv_filename =metrics_filename .replace ('.png','.csv')
     csv_path =os .path .join (base_results_dir ,csv_filename )
 
-    
+
     departing_evs =performance_metrics .get ('departing_evs',[])
     departing_evs_soc_met =performance_metrics .get ('departing_evs_soc_met',[])
     avg_soc_deficit_list =performance_metrics .get ('avg_soc_deficit',[])
@@ -285,7 +313,7 @@ def plot_performance_metrics (performance_metrics ,results_dir ,title_prefix :st
     station_limit_penalty_total_list =performance_metrics .get ('station_limit_penalty_total',[])
     station_limit_penalty_per_step_list =performance_metrics .get ('station_limit_penalty_per_step',[])
     station_limit_penalty_per_hit_list =performance_metrics .get ('station_limit_penalty_per_hit',[])
-    has_switch_cols =len (avg_switches_list )>0 
+    has_switch_cols =len (avg_switches_list )>0
     has_stlimit_cols =(
     len (station_limit_hits_list )>0 or
     len (station_limit_steps_list )>0 or
@@ -359,20 +387,26 @@ def plot_performance_metrics (performance_metrics ,results_dir ,title_prefix :st
             writer .writerow (row )
 
 
-            
-            
-            
+
+
+
 def plot_station_cooperation_full (all_episode_data :dict ,
 results_dir :str ,
 random_window :bool =False ,
 title_prefix :str ="")->None :
-    "Documentation."
-    import random 
+    """
+    Visualize how stations collectively satisfy the grid request over time.
 
-    
+    For each episode, station powers are stacked by sign so charging and
+    discharging contributions remain visible. The grid request and total station
+    power are overlaid with the dispatch tolerance band.
+    """
+    import random
+
+
     title_prefix_en =title_prefix
 
-    
+
     episode_keys =sorted (all_episode_data .keys ())
     if len (episode_keys )>10 :
         episode_keys =episode_keys [-10 :]
@@ -381,19 +415,19 @@ title_prefix :str ="")->None :
         ep =all_episode_data [ep_key ]
         total_steps =len (ep ["ag_requests"])
 
-        
-        start =0 
-        end =total_steps 
+
+        start =0
+        end =total_steps
         rng =np .arange (end -start )
 
-        
-        num_stations =0 
+
+        num_stations =0
         while f"actual_ev{num_stations+1}"in ep :
-            num_stations +=1 
+            num_stations +=1
         if num_stations ==0 :
             raise ValueError ("Visualization requires actual_ev* series. Found none in episode data.")
 
-            
+
         stations =[]
         for i in range (1 ,num_stations +1 ):
             key =f"actual_ev{i}"
@@ -404,33 +438,33 @@ title_prefix :str ="")->None :
 
         ag_req =np .asarray (ep ["ag_requests"][start :end ],dtype =float )
 
-        
+
         if "total_ev_transport"not in ep :
             raise KeyError ("Visualization requires 'total_ev_transport' series. Found none in episode data.")
         total_station_power =np .asarray (ep ["total_ev_transport"][start :end ],dtype =float )
 
-        
 
-        
-        tol_narrow =TOL_NARROW_METRICS 
 
-        
-        
+
+        tol_narrow =TOL_NARROW_METRICS
+
+
+
         narrow_success_count =np .sum (np .abs (ag_req -total_station_power )<=tol_narrow )
-        
-        narrow_success_rate =narrow_success_count /len (rng )*100.0 
 
-        
+        narrow_success_rate =narrow_success_count /len (rng )*100.0
+
+
         fig ,ax =plt .subplots (figsize =(20 ,12 ))
         bottoms =np .zeros_like (rng ,dtype =float )
-        width =.9 
+        width =.9
 
         labels =[f"Station {i}"for i in range (1 ,num_stations +1 )]
 
-        
+
         colors =plt .cm .tab20 (np .linspace (0 ,1 ,num_stations ))
         if num_stations >20 :
-        
+
             cmap1 =plt .cm .tab20 (np .linspace (0 ,1 ,20 ))
             cmap2 =plt .cm .tab20b (np .linspace (0 ,1 ,20 ))
             cmap3 =plt .cm .tab20c (np .linspace (0 ,1 ,20 ))
@@ -438,7 +472,7 @@ title_prefix :str ="")->None :
             cmap5 =plt .cm .Pastel1 (np .linspace (0 ,1 ,20 ))
             colors =np .vstack ([cmap1 ,cmap2 ,cmap3 ,cmap4 ,cmap5 ])[:num_stations ]
 
-            
+
         pos_bottoms =np .zeros_like (rng ,dtype =float )
         neg_bottoms =np .zeros_like (rng ,dtype =float )
         for s ,lbl ,col in zip (stations ,labels ,colors ):
@@ -448,75 +482,75 @@ title_prefix :str ="")->None :
             pos_drawn =np .any (pos !=0 )
             neg_drawn =np .any (neg !=0 )
 
-            
+
             if pos_drawn :
                 ax .bar (rng ,pos ,width ,bottom =pos_bottoms ,label =lbl ,color =col ,alpha =.7 )
 
-                
+
             if neg_drawn :
                 label_for_neg =lbl if not pos_drawn else "_nolegend_"
                 ax .bar (rng ,neg ,width ,bottom =neg_bottoms ,label =label_for_neg ,color =col ,alpha =.7 )
 
-                
+
             if not pos_drawn and not neg_drawn :
                 ax .plot ([],[],color =col ,label =lbl ,linestyle ='-')
 
-            pos_bottoms +=pos 
-            neg_bottoms +=neg 
+            pos_bottoms +=pos
+            neg_bottoms +=neg
 
 
-            
-            
-            
+
+
+
         ax .step (rng ,ag_req ,"k-",lw =6 ,where ='mid',label ="Grid Request",alpha =0.8 )
 
-        
+
         ax .plot (rng ,total_station_power ,"m-",lw =9 ,label ="Total Station Power")
 
-        
-        
+
+
         for i ,step_idx in enumerate (rng ):
             step_req =ag_req [i ]
-            step_upper =step_req +tol_narrow 
-            step_lower =step_req -tol_narrow 
+            step_upper =step_req +tol_narrow
+            step_lower =step_req -tol_narrow
 
-            
+
             ax .fill_between ([step_idx -0.4 ,step_idx +0.4 ],
             [step_lower ,step_lower ],
             [step_upper ,step_upper ],
             color ='gray',alpha =0.15 ,edgecolor ='none')
 
-            
-        import matplotlib .patches as mpatches 
+
+        import matplotlib .patches as mpatches
         narrow_patch =mpatches .Patch (color ='gray',alpha =0.15 ,label ="Tolerance band")
 
         ax .axhline (0 ,color ="k",alpha =.3 ,linewidth =3 )
         ax .set_xticks (rng )
-        
+
         ax .set_xticklabels ([start +i +1 for i in rng ])
         ax .set_xlabel ("Step")
         ax .set_ylabel ("Power ")
-        
-        
-        
+
+
+
         ax .grid (alpha =.3 ,linewidth =3 )
 
-        
+
         if num_stations <=10 :
-        
+
             handles ,labels =ax .get_legend_handles_labels ()
-            
+
             handles .append (narrow_patch )
             labels .append ("Tolerance band")
             ax .legend (handles =handles ,labels =labels ,loc ="upper left")
         else :
-        
+
             handles ,labels =ax .get_legend_handles_labels ()
-            
+
             non_station_items =[i for i ,lbl in enumerate (labels )if not lbl .startswith ("Station")]
             selected_items =non_station_items +list (range (min (3 ,num_stations )))
 
-            
+
             selected_handles =[handles [i ]for i in selected_items ]
             selected_labels =[labels [i ]for i in selected_items ]
             selected_handles .append (narrow_patch )
@@ -524,30 +558,30 @@ title_prefix :str ="")->None :
 
             ax .legend (handles =selected_handles ,labels =selected_labels ,loc ="upper left")
 
-            
+
         fig .tight_layout ()
 
-        
-        
-        
+
+
+
         base_fname =f"zz_station_cooperation_full_episode_{ep_key}"+(
         "_random_window"if random_window else ""
         )
-        fname =base_fname 
+        fname =base_fname
         if title_prefix :
             fname =f"{title_prefix_en.lower().replace(' ', '_')}_{base_fname}"
         fig .savefig (os .path .join (results_dir ,f"{fname}.png"))
         plt .close (fig )
 
-        
+
         base_csv_fname =f"zz_station_cooperation_full_episode_{ep_key}"
-        csv_fname =base_csv_fname 
+        csv_fname =base_csv_fname
         if title_prefix :
             csv_fname =f"{title_prefix_en.lower().replace(' ', '_')}_{base_csv_fname}"
         csv_filename =f"{csv_fname}.csv"
         csv_path =os .path .join (results_dir ,csv_filename )
 
-        
+
         all_ag_req =np .asarray (ep ["ag_requests"],dtype =float )
         all_stations =[]
         for i in range (1 ,num_stations +1 ):
@@ -557,10 +591,10 @@ title_prefix :str ="")->None :
 
         with open (csv_path ,'w',newline ='',encoding ='utf-8')as f :
             writer =csv .writer (f )
-            
+
             header =['Step','Grid_Request']+[f'Station_{i}'for i in range (1 ,num_stations +1 )]+['Total_Station_Power']
             writer .writerow (header )
-            
+
             for i in range (total_steps ):
                 row =[i +1 ,all_ag_req [i ]]
                 for s in all_stations :
@@ -569,21 +603,27 @@ title_prefix :str ="")->None :
                 writer .writerow (row )
 
 
-                
-                
-                
+
+
+
 def plot_ev_detailed_soc (all_episode_data :dict ,
 results_dir :str ,
 display_steps :int =48 ,
 random_window :bool =False ,
 title_prefix :str ="")->None :
-    "Documentation."
-    import random 
+    """
+    Plot representative EV SoC trajectories against their target SoC.
 
-    
+    The function selects long-dwell EVs from recent episodes so reviewers can
+    inspect whether the policy gradually closes charging deficits before
+    departure, rather than only checking aggregate hit rates.
+    """
+    import random
+
+
     title_prefix_en =title_prefix
 
-    
+
     episode_keys =sorted (all_episode_data .keys ())
     if len (episode_keys )>2 :
         episode_keys =episode_keys [-2 :]
@@ -594,13 +634,13 @@ title_prefix :str ="")->None :
 
         soc_data =ep .get ("soc_data",{})
         if not soc_data :
-            continue 
+            continue
 
-            
+
         long_stay_evs =find_long_stay_evs (soc_data ,min_stay =10 ,max_evs =3 )
 
         for idx ,long_stay_ev in enumerate (long_stay_evs ):
-        
+
             long_stay_fname =f"test_results_ev_soc_long_stay_{idx+1}_episode_{ep_key}"
             if title_prefix :
                 prefix =title_prefix_en .lower ().replace (' ','_')
@@ -608,9 +648,9 @@ title_prefix :str ="")->None :
                     long_stay_fname =f"{prefix}_{long_stay_fname}"
 
             if long_stay_ev :
-                station_id ,ev_id ,ev_data =long_stay_ev 
+                station_id ,ev_id ,ev_data =long_stay_ev
 
-                
+
                 csv_filename =f"{long_stay_fname}.csv"
                 csv_path =os .path .join (results_dir ,csv_filename )
                 with open (csv_path ,'w',newline ='',encoding ='utf-8')as f :
@@ -618,28 +658,29 @@ title_prefix :str ="")->None :
                     writer .writerow (['Step','EV_ID','Station','SoC_%','Target_%','Departure_Step'])
                     ts =np .asarray (ev_data ["times"])
                     soc_values =np .asarray (ev_data ["soc"])
-                    
+
                     for j ,step in enumerate (ts ):
                         if j <len (soc_values ):
                             writer .writerow ([step ,ev_id ,station_id ,soc_values [j ],ev_data ['target'],ev_data .get ('depart','N/A')])
 
-                            
+
                 fig_long ,ax_long =plt .subplots (figsize =(14 ,8 ))
                 soc_color ="tab:blue"
                 dispatch_color ="tab:red"
 
-                
-                start =0 
-                end =total_steps 
+
+                start =0
+                end =total_steps
                 ag_req =np .asarray (ep ["ag_requests"][start :end ],dtype =float )
 
-                
+
+                # Background color by dispatch sign only (+: red tint, -: green tint)
                 for i in range (len (ag_req )):
-                    x =start +i 
+                    x =start +i
                     if ag_req [i ]>0 :
-                        ax_long .axvspan (x -0.5 ,x +0.5 ,color ='lightgreen',alpha =0.2 )
+                        ax_long .axvspan (x -0.5 ,x +0.5 ,color ='lightcoral',alpha =0.16 )
                     elif ag_req [i ]<0 :
-                        ax_long .axvspan (x -0.5 ,x +0.5 ,color ='lightpink',alpha =0.2 )
+                        ax_long .axvspan (x -0.5 ,x +0.5 ,color ='lightgreen',alpha =0.16 )
 
                 ts =np .asarray (ev_data ["times"],dtype =float )
                 soc_values =np .asarray (ev_data ["soc"],dtype =float )
@@ -647,11 +688,11 @@ title_prefix :str ="")->None :
                 ts_plot =ts [mask ]
                 soc_plot =soc_values [mask ]
 
-                
+
                 departure_time =ev_data .get ("depart_step",ev_data .get ("depart",None ))
                 target_soc =float (ev_data .get ("target",np .nan ))
-                target_achieved =True 
-                depart_soc =None 
+                target_achieved =True
+                depart_soc =None
                 if departure_time is not None :
                     dep_idx =np .where (ts ==float (departure_time ))[0 ]
                     if dep_idx .size >0 :
@@ -668,11 +709,11 @@ title_prefix :str ="")->None :
                 label =f"EV {ev_id} (Target {target_soc:.0f}%)"
                 )
 
-                
+
                 if np .isfinite (target_soc ):
                     ax_long .axhline (target_soc ,color ="green",ls ="--",alpha =0.6 ,lw =4.5 ,label ="Target SoC")
 
-                    
+
                 if departure_time is not None and start <=float (departure_time )<end :
                     ax_long .axvline (float (departure_time ),color =soc_color ,ls ="--",alpha =0.8 ,lw =4.5 )
                     if depart_soc is not None :
@@ -683,23 +724,19 @@ title_prefix :str ="")->None :
                             label_col ="green"if depart_soc >=target_soc else "red"
                             ax_long .text (float (departure_time ),depart_soc +5.0 ,label_txt ,color =label_col ,ha ="center",fontsize =9 *3 )
 
-                            
+
                 ax_long2 =ax_long .twinx ()
                 t_range =np .arange (start ,end )
                 if ag_req .size >0 :
-                    y_pos =np .where (ag_req >=0.0 ,ag_req ,np .nan )
-                    y_neg =np .where (ag_req <0.0 ,ag_req ,np .nan )
-                    ax_long2 .plot (t_range ,y_pos ,color =dispatch_color ,lw =3.2 ,alpha =0.95 ,label ="Dispatch (+)")
-                    ax_long2 .plot (t_range ,y_neg ,color ="tab:blue",lw =3.2 ,alpha =0.95 ,label ="Dispatch (-)")
-                    ax_long2 .fill_between (t_range ,0 ,ag_req ,where =(ag_req >0 ),color =dispatch_color ,alpha =0.15 )
-                    ax_long2 .fill_between (t_range ,0 ,ag_req ,where =(ag_req <0 ),color ="tab:blue",alpha =0.15 )
+                    # Keep dispatch line color unified in red regardless of sign
+                    ax_long2 .plot (t_range ,ag_req ,color =dispatch_color ,lw =3.2 ,alpha =0.95 ,label ="Dispatch")
                 ax_long2 .set_ylabel ("Dispatch signal [kW]",fontsize =22 ,color =dispatch_color )
                 ax_long2 .tick_params (axis ='y',labelcolor =dispatch_color ,labelsize =16 )
                 ax_long2 .axhline (0 ,color =dispatch_color ,ls ="--",lw =1.2 ,alpha =0.45 )
 
                 ax_long .set_title (
                 f"Long Stay EV #{idx+1} - {station_id} / EV {ev_id}",
-                fontsize =30 
+                fontsize =30
                 )
                 ax_long .set_xlabel ("Time Step",fontsize =22 )
                 ax_long .set_ylabel ("SoC [%]",fontsize =22 ,color =soc_color )
@@ -719,60 +756,60 @@ title_prefix :str ="")->None :
                 fig_long .savefig (out_png ,dpi =180 ,bbox_inches ='tight')
                 plt .close (fig_long )
 
-                
-                
-        max_stay_duration =0 
+
+
+        max_stay_duration =0
         if soc_data :
             for station_evs in soc_data .values ():
                 for ev in station_evs .values ():
                     if "times"in ev and len (ev ["times"])>0 :
                         ev_start =min (ev ["times"])
                         ev_end =max (ev ["times"])
-                        stay_duration =ev_end -ev_start 
+                        stay_duration =ev_end -ev_start
                         max_stay_duration =max (max_stay_duration ,stay_duration )
 
-                        
+
         fig_random ,ax_random =plt .subplots (figsize =(14 ,8 ))
 
-        
+
         soc_color ="tab:blue"
         dispatch_color ="tab:red"
-        ax_random2 =None 
+        ax_random2 =None
 
-        
+
         if soc_data :
             station_key =random .choice (list (soc_data .keys ()))
             evs =soc_data [station_key ]
 
-            
-            start =0 
-            end =total_steps 
 
-            
+            start =0
+            end =total_steps
+
+
             valid_evs ={}
             for ev_id ,ev in evs .items ():
                 ts =np .asarray (ev ["times"])
-                
+
                 if len (ts )>0 :
                     ev_start =min (ts )
                     ev_end =max (ts )
-                    
-                    if ev_start <=end and ev_end >=start :
-                        valid_evs [ev_id ]=ev 
 
-                        
+                    if ev_start <=end and ev_end >=start :
+                        valid_evs [ev_id ]=ev
+
+
             if not valid_evs :
                 for st_key ,st_evs in soc_data .items ():
                     if st_evs :
-                        station_key =st_key 
-                        evs =st_evs 
-                        
+                        station_key =st_key
+                        evs =st_evs
+
                         first_ev =list (st_evs .values ())[0 ]
                         first_ev_times =np .asarray (first_ev ["times"])
                         if len (first_ev_times )>0 :
                             start =max (0 ,int (first_ev_times [0 ]))
                             end =min (total_steps ,start +display_steps )
-                            
+
                             valid_evs ={}
                             for ev_id ,ev in evs .items ():
                                 ts =np .asarray (ev ["times"])
@@ -780,117 +817,117 @@ title_prefix :str ="")->None :
                                     ev_start =min (ts )
                                     ev_end =max (ts )
                                     if ev_start <=end and ev_end >=start :
-                                        valid_evs [ev_id ]=ev 
+                                        valid_evs [ev_id ]=ev
                             if valid_evs :
-                                break 
+                                break
 
-                                
+
             ag_req =np .asarray (ep ["ag_requests"][start :end ],dtype =float )
 
-            
+
             for i in range (len (ag_req )):
                 if ag_req [i ]>0 :
                     ax_random .axvspan (start +i -0.5 ,start +i +0.5 ,color ='lightgreen',alpha =0.2 )
                 elif ag_req [i ]<0 :
                     ax_random .axvspan (start +i -0.5 ,start +i +0.5 ,color ='lightpink',alpha =0.2 )
 
-                    
+
             if valid_evs :
-            
+
                 ev_ids_to_show =list (valid_evs .keys ())
                 if len (ev_ids_to_show )>5 :
                     random .shuffle (ev_ids_to_show )
                     ev_ids_to_show =ev_ids_to_show [:5 ]
 
-                    
+
                 colors =plt .cm .tab10 (np .linspace (0 ,1 ,len (ev_ids_to_show )))
 
-                
+
                 for i ,ev_id in enumerate (ev_ids_to_show ):
                     ev =valid_evs [ev_id ]
                     ts =np .asarray (ev ["times"])
                     soc_vals =np .asarray (ev ["soc"])
                     color =colors [i ]
 
-                    
-                    target_achieved =True 
+
+                    target_achieved =True
                     if "soc"in ev and "depart"in ev and "target"in ev :
                         depart_idx =[j for j ,t in enumerate (ev ["times"])if t ==ev ["depart"]]
                         if depart_idx and ev ["soc"][depart_idx [0 ]]<ev ["target"]:
-                            target_achieved =False 
+                            target_achieved =False
 
                     line_style ="--"if not target_achieved else "-"
-                    line_color =color 
+                    line_color =color
 
-                    
+
                     if len (ts )>0 and len (soc_vals )>0 :
                         ax_random .plot (ts ,soc_vals ,
                         label =f"EV {ev_id} (Target {ev['target']:.0f}%)",
                         color =line_color ,lw =6 ,ls =line_style )
 
-                        
+
                     depart_time_rand =ev .get ("depart_step",ev .get ("depart",None ))
                     if depart_time_rand is not None :
                         ax_random .axvline (depart_time_rand ,color =color ,ls ="--",alpha =0.7 ,lw =4.5 )
-                        
+
                         depart_idx =[j for j ,t in enumerate (ev ["times"])if t ==depart_time_rand ]
-                        
-                        depart_soc =None 
+
+                        depart_soc =None
                         if "final_soc"in ev :
-                        
+
                             depart_soc =ev ["final_soc"]
-                            
+
                             ax_random .plot ([depart_time_rand ],[depart_soc ],'o',color =color ,markersize =8 *3 )
-                            
+
                             if "target_soc"in ev :
                                 ax_random .axhline (ev ["target_soc"],color ="green",ls ="--",alpha =0.3 ,lw =4.5 )
                                 ax_random .plot ([depart_time_rand ],[ev ["target_soc"]],'s',color ="green",markersize =6 *3 ,alpha =0.7 )
-                                
+
                                 if depart_soc >=ev ["target_soc"]:
                                     ax_random .text (depart_time_rand ,depart_soc +5 ,"Goal met!",color ="green",ha ="center",fontsize =9 *3 )
                                 else :
                                     ax_random .text (depart_time_rand ,depart_soc +5 ,"Goal not met",color ="red",ha ="center",fontsize =9 *3 )
                         elif depart_idx :
-                        
+
                             depart_soc =ev ["soc"][depart_idx [0 ]]
                             ax_random .plot ([depart_time_rand ],[depart_soc ],'o',color =color ,markersize =6 *3 )
-                            
+
                             if "target"in ev :
                                 target_soc =ev ["target"]
                                 ax_random .axhline (target_soc ,color ="green",ls ="--",alpha =0.3 ,lw =4.5 )
                                 ax_random .plot ([depart_time_rand ],[target_soc ],'s',color ="green",markersize =6 *3 ,alpha =0.7 )
-                                
+
                                 if depart_soc >=target_soc :
                                     ax_random .text (depart_time_rand ,depart_soc +5 ,"Goal met!",color ="green",ha ="center",fontsize =9 *3 )
                                 else :
                                     ax_random .text (depart_time_rand ,depart_soc +5 ,"Goal not met",color ="red",ha ="center",fontsize =9 *3 )
-                                    
+
                         if depart_soc is not None and not any (ts ==depart_time_rand ):
-                        
+
                             plot_ts =np .append (ts ,[depart_time_rand ])
                             plot_soc =np .append (soc_vals ,[depart_soc ])
-                            
+
                             sort_idx =np .argsort (plot_ts )
                             ax_random .plot (plot_ts [sort_idx ],plot_soc [sort_idx ],color =line_color ,lw =6 ,ls =line_style ,alpha =0.7 )
 
-                            
+
                 ax_random2 =ax_random .twinx ()
                 time_range =np .arange (start ,end )
 
-                
+
                 ax_random2 .plot (time_range ,ag_req ,"-",lw =3 ,label ="Dispatch signal value",color =dispatch_color )
                 ax_random2 .set_ylabel ("Dispatch signal value [kW]",color =dispatch_color ,fontsize =30 )
                 ax_random2 .tick_params (axis ="y",labelcolor =dispatch_color ,labelsize =24 )
                 ax_random2 .spines ["right"].set_color (dispatch_color )
 
-                
+
                 ax_random .spines ["left"].set_color (soc_color )
                 ax_random .spines ["bottom"].set_color ("black")
                 ax_random .tick_params (axis ="x",colors ="black")
                 ax_random .tick_params (axis ="y",labelcolor =soc_color )
 
-                
-                
+
+
                 ax_random .set_xlim (start ,end -1 )
             else :
                 ax_random .text (0.5 ,0.5 ,"No EVs connected in this time window",
@@ -902,7 +939,7 @@ title_prefix :str ="")->None :
         ax_random .set_ylabel ("SoC [%]",color =soc_color )
         ax_random .set_ylim (0 ,105 )
         ax_random .grid (alpha =.3 ,linewidth =3 )
-        
+
         lines1 ,labels1 =ax_random .get_legend_handles_labels ()
         if ax_random2 is not None :
             lines2 ,labels2 =ax_random2 .get_legend_handles_labels ()
@@ -910,17 +947,17 @@ title_prefix :str ="")->None :
         else :
             ax_random .legend (loc ="best")
 
-            
+
         fig_random .tight_layout ()
 
-        
+
         random_window_fname =f"ev_soc_random_window_episode_{ep_key}"
         if title_prefix :
             random_window_fname =f"{title_prefix_en.lower().replace(' ', '_')}_{random_window_fname}"
         fig_random .savefig (os .path .join (results_dir ,f"{random_window_fname}.png"))
         plt .close (fig_random )
 
-        
+
         if soc_data and valid_evs :
             csv_filename =f"{random_window_fname}.csv"
             csv_path =os .path .join (results_dir ,csv_filename )
@@ -931,110 +968,94 @@ title_prefix :str ="")->None :
                     ev =valid_evs [ev_id ]
                     ts =np .asarray (ev ["times"])
                     soc_vals =np .asarray (ev ["soc"])
-                    
+
                     for j ,step in enumerate (ts ):
                         if j <len (soc_vals ):
                             writer .writerow ([step ,ev_id ,station_key ,soc_vals [j ],ev ['target']])
 
-            
-            
-        "Info."
 
-        
-        
+
+        pass
+
+
+
 def find_long_stay_evs (soc_data ,min_stay =10 ,max_evs =3 ):
-    "Documentation."
+    """Select representative long-dwell EVs from `soc_data` for SoC plots."""
     long_stay_evs =[]
     for station_id ,evs in sorted (soc_data .items ()):
         for ev_id ,ev in evs .items ():
             if "times"in ev and "depart"in ev :
                 arrival_time =min (ev ["times"])
                 departure_time =ev ["depart"]
-                stay_duration =departure_time -arrival_time 
+                stay_duration =departure_time -arrival_time
                 if stay_duration >=min_stay :
                     long_stay_evs .append ((station_id ,ev_id ,ev ))
 
-                    
-    return long_stay_evs [:max_evs ]if len (long_stay_evs )>max_evs else long_stay_evs 
 
-    
-def find_short_stay_evs (soc_data ,min_stay =2 ,max_stay =5 ,max_evs =5 ):
-    "Documentation."
-    short_stay_evs =[]
-    for station_id ,evs in sorted (soc_data .items ()):
-        for ev_id ,ev in evs .items ():
-            if "times"in ev and "depart"in ev :
-                arrival_time =min (ev ["times"])
-                departure_time =ev ["depart"]
-                stay_duration =departure_time -arrival_time 
-                if min_stay <=stay_duration <=max_stay :
-                    short_stay_evs .append ((station_id ,ev_id ,ev ))
-
-                    
-    import random 
-    random .shuffle (short_stay_evs )
-    return short_stay_evs [:max_evs ]if len (short_stay_evs )>max_evs else short_stay_evs 
-
-    
-from torch .utils .tensorboard import SummaryWriter 
-import os 
-
+    return long_stay_evs [:max_evs ]if len (long_stay_evs )>max_evs else long_stay_evs
 
 def create_tensorboard_writer (log_dir ="temp/timing",comment =None ,purge_step =None ,max_queue =10 ,flush_secs =120 ,filename_suffix =''):
-    "Documentation."
-    
+    """Create a TensorBoard SummaryWriter after ensuring the log directory exists."""
+
     os .makedirs (log_dir ,exist_ok =True )
 
-    
+
     return SummaryWriter (
     log_dir =log_dir ,
     comment =comment ,
     purge_step =purge_step ,
     max_queue =max_queue ,
     flush_secs =flush_secs ,
-    filename_suffix =filename_suffix 
+    filename_suffix =filename_suffix
     )
 
 
 
 
-    
-    
-    
+
+
+
 class GradientLossVisualizer :
-    "Documentation."
+    """
+    Accumulate training diagnostics during an episode and emit TensorBoard means.
+
+    The trainer calls `update_*()` once per environment step. At episode end,
+    `record_to_tensorboard()` writes averaged Q values, gradient norms, losses,
+    and clipping counts. The class supports both distributed multi-agent critics
+    and centralized-joint baselines by switching layout based on agent metadata.
+    """
 
     def __init__ (self ,num_stations ,tb_writer =None ):
-        "Documentation."
-        self .num_stations =num_stations 
-        self .tb_writer =tb_writer 
-        self .mode =None 
+        """Initialize per-episode accumulators for `num_stations` agents."""
+        self .num_stations =num_stations
+        self .tb_writer =tb_writer
+        self .mode =None
         self .reset_episode_data ()
 
     def _set_mode (self ,mode ):
         if self .mode is None :
-            self .mode =mode 
+            self .mode =mode
         elif self .mode !=mode :
-            self .mode =mode 
+            self .mode =mode
 
     def update_q_values (self ,q_values_per_agent ,q_mean ,q_global ):
-        "Documentation."
+        """Accumulate local/global critic Q values for distributed agents."""
         self ._set_mode ("distributed")
         for i ,q_val in enumerate (q_values_per_agent ):
             if i <len (self .local_q_agents_sums ):
-                self .local_q_agents_sums [i ]+=q_val 
-        self .local_q_mean_sum +=q_mean 
-        self .global_q_sum +=q_global 
-        self .q_step_count +=1 
+                self .local_q_agents_sums [i ]+=q_val
+        self .local_q_mean_sum +=q_mean
+        self .global_q_sum +=q_global
+        self .q_step_count +=1
 
     def update_central_q_value (self ,q_value ):
-        "Documentation."
+        """Accumulate a centralized critic Q value for joint-policy baselines."""
         self ._set_mode ("centralized_joint")
         self .central_q_sum +=float (q_value )
-        self .q_step_count +=1 
+        self .q_step_count +=1
 
     def update_gradients (self ,agent ):
-        "Documentation."
+        """Read the latest gradient diagnostics exposed by the agent."""
         is_central =getattr (agent ,"visualizer_layout","")=="centralized_joint"
         if is_central :
             self ._set_mode ("centralized_joint")
@@ -1089,20 +1110,20 @@ class GradientLossVisualizer :
             if hasattr (agent ,'critic_norms_before_clip')and len (agent .critic_norms_before_clip )==self .num_stations :
                 for i ,critic_norm_before in enumerate (agent .critic_norms_before_clip ):
                     if i <len (self .critic_norms_sums_before_clip ):
-                        self .critic_norms_sums_before_clip [i ]+=critic_norm_before 
+                        self .critic_norms_sums_before_clip [i ]+=critic_norm_before
 
             if hasattr (agent ,'actor_norms_before_clip')and len (agent .actor_norms_before_clip )==self .num_stations :
                 for i ,actor_norm_before in enumerate (agent .actor_norms_before_clip ):
                     if i <len (self .actor_norms_sums_before_clip ):
-                        self .actor_norms_sums_before_clip [i ]+=actor_norm_before 
+                        self .actor_norms_sums_before_clip [i ]+=actor_norm_before
 
             self .local_critic_grad_sum +=getattr (agent ,'last_local_critic_grad_norm',0.0 )
             self .global_critic_grad_sum +=getattr (agent ,'last_global_critic_grad_norm',0.0 )
 
-        self .grad_step_count +=1 
+        self .grad_step_count +=1
 
     def update_losses (self ,agent ):
-        "Documentation."
+        """Read the latest critic/actor loss diagnostics exposed by the agent."""
         is_central =getattr (agent ,"visualizer_layout","")=="centralized_joint"
         if is_central :
             self ._set_mode ("centralized_joint")
@@ -1113,19 +1134,19 @@ class GradientLossVisualizer :
             if hasattr (agent ,'critic_losses')and len (agent .critic_losses )==self .num_stations :
                 for i ,loss in enumerate (agent .critic_losses ):
                     if i <len (self .critic_loss_sums ):
-                        self .critic_loss_sums [i ]+=loss 
+                        self .critic_loss_sums [i ]+=loss
 
             self .global_critic_loss_sum +=getattr (agent ,'last_global_critic_loss',0.0 )
 
             if hasattr (agent ,'actor_losses')and len (agent .actor_losses )==self .num_stations :
                 for i ,loss in enumerate (agent .actor_losses ):
                     if i <len (self .actor_loss_sums ):
-                        self .actor_loss_sums [i ]+=loss 
+                        self .actor_loss_sums [i ]+=loss
 
-        self .loss_step_count +=1 
+        self .loss_step_count +=1
 
     def update_clipping (self ,agent ):
-        "Documentation."
+        """Accumulate per-step gradient clipping counts."""
         is_central =getattr (agent ,"visualizer_layout","")=="centralized_joint"
         if is_central :
             self ._set_mode ("centralized_joint")
@@ -1138,23 +1159,26 @@ class GradientLossVisualizer :
             if hasattr (agent ,'local_critic_clip_counts')and len (agent .local_critic_clip_counts )==self .num_stations :
                 for i ,clip_count in enumerate (agent .local_critic_clip_counts ):
                     if i <len (self .local_critic_clip_sums ):
-                        self .local_critic_clip_sums [i ]+=clip_count 
+                        self .local_critic_clip_sums [i ]+=clip_count
 
             if hasattr (agent ,'actor_clip_counts')and len (agent .actor_clip_counts )==self .num_stations :
                 for i ,clip_count in enumerate (agent .actor_clip_counts ):
                     if i <len (self .actor_clip_sums ):
-                        self .actor_clip_sums [i ]+=clip_count 
+                        self .actor_clip_sums [i ]+=clip_count
 
-        self .clip_step_count +=1 
+        self .clip_step_count +=1
 
     def record_to_tensorboard (self ,episode ):
-        "Documentation."
+        """Write aggregated Q/gradient/loss/clipping metrics to TensorBoard."""
         if not self .tb_writer :
-            return 
+            return
 
-        w =self .tb_writer 
+        w =self .tb_writer
+        try :
+            from Config import TB_VERBOSE as _verbose
+        except Exception :
+            _verbose =False
 
-        
         if self .mode =="centralized_joint":
             if self .q_step_count >0 :
                 w .add_scalar ("Q/central_mean",self .central_q_sum /self .q_step_count ,episode )
@@ -1173,36 +1197,20 @@ class GradientLossVisualizer :
                 self .central_critic_clip_sum /self .clip_step_count ,episode )
                 w .add_scalar ("Clipping/central_actor",
                 self .central_actor_clip_sum /self .clip_step_count ,episode )
-            return 
+            return
 
-            
-            
         if self .q_step_count >0 :
-            n =self .q_step_count 
-            for i ,s in enumerate (self .local_q_agents_sums ):
-                w .add_scalar (f"Q/local_agent{i+1}",s /n ,episode )
+            n =self .q_step_count
             w .add_scalar ("Q/local_mean",self .local_q_mean_sum /n ,episode )
             w .add_scalar ("Q/global",self .global_q_sum /n ,episode )
+            if _verbose :
+                for i ,s in enumerate (self .local_q_agents_sums ):
+                    w .add_scalar (f"Q/local_agent{i+1}",s /n ,episode )
 
-            
         if self .grad_step_count >0 :
-            n =self .grad_step_count 
-            for i ,v in enumerate (self .critic_norms_sums_before_clip ):
-                w .add_scalar (f"Gradient/local_critic_raw_agent{i+1}",v /n ,episode )
+            n =self .grad_step_count
             w .add_scalar ("Gradient/global_critic_raw",
             self .global_critic_grad_sum_before_clip /n ,episode )
-            for i ,v in enumerate (self .actor_norms_sums_before_clip ):
-                w .add_scalar (f"Gradient/actor_raw_agent{i+1}",v /n ,episode )
-            for i ,v in enumerate (self .actor_source_local_norm_sums_before_clip ):
-                w .add_scalar (f"Gradient/actor_source_local_raw_agent{i+1}",v /n ,episode )
-            for i ,v in enumerate (self .actor_source_global_norm_sums_before_clip ):
-                w .add_scalar (f"Gradient/actor_source_global_raw_agent{i+1}",v /n ,episode )
-            for i ,v in enumerate (self .actor_source_global_ratio_sums ):
-                w .add_scalar (f"Gradient/actor_source_global_ratio_agent{i+1}",v /n ,episode )
-            for i ,v in enumerate (self .actor_source_cos_sums ):
-                w .add_scalar (f"Gradient/actor_source_cos_agent{i+1}",v /n ,episode )
-            for i ,v in enumerate (self .actor_source_cos_valid_sums ):
-                w .add_scalar (f"Gradient/actor_source_cos_valid_fraction_agent{i+1}",v /n ,episode )
             w .add_scalar ("Gradient/actor_source_local_raw_mean",
             self .actor_source_local_grad_sum_before_clip /n ,episode )
             w .add_scalar ("Gradient/actor_source_global_raw_mean",
@@ -1213,103 +1221,142 @@ class GradientLossVisualizer :
             self .actor_source_cos_sum /n ,episode )
             w .add_scalar ("Gradient/actor_source_cos_valid_fraction_mean",
             self .actor_source_cos_valid_fraction_sum /n ,episode )
-            
             w .add_scalar ("Gradient/local_critic_mean_after_clip",
             self .local_critic_grad_sum /n ,episode )
             w .add_scalar ("Gradient/global_critic_after_clip",
             self .global_critic_grad_sum /n ,episode )
+            if _verbose :
+                for i ,v in enumerate (self .critic_norms_sums_before_clip ):
+                    w .add_scalar (f"Gradient/local_critic_raw_agent{i+1}",v /n ,episode )
+                for i ,v in enumerate (self .actor_norms_sums_before_clip ):
+                    w .add_scalar (f"Gradient/actor_raw_agent{i+1}",v /n ,episode )
+                for i ,v in enumerate (self .actor_source_local_norm_sums_before_clip ):
+                    w .add_scalar (f"Gradient/actor_source_local_raw_agent{i+1}",v /n ,episode )
+                for i ,v in enumerate (self .actor_source_global_norm_sums_before_clip ):
+                    w .add_scalar (f"Gradient/actor_source_global_raw_agent{i+1}",v /n ,episode )
+                for i ,v in enumerate (self .actor_source_global_ratio_sums ):
+                    w .add_scalar (f"Gradient/actor_source_global_ratio_agent{i+1}",v /n ,episode )
+                for i ,v in enumerate (self .actor_source_cos_sums ):
+                    w .add_scalar (f"Gradient/actor_source_cos_agent{i+1}",v /n ,episode )
+                for i ,v in enumerate (self .actor_source_cos_valid_sums ):
+                    w .add_scalar (f"Gradient/actor_source_cos_valid_fraction_agent{i+1}",v /n ,episode )
 
-            
         if self .loss_step_count >0 :
-            n =self .loss_step_count 
-            for i ,v in enumerate (self .critic_loss_sums ):
-                w .add_scalar (f"Loss/local_critic_agent{i+1}",v /n ,episode )
+            n =self .loss_step_count
             w .add_scalar ("Loss/global_critic",self .global_critic_loss_sum /n ,episode )
-            for i ,v in enumerate (self .actor_loss_sums ):
-                w .add_scalar (f"Loss/actor_agent{i+1}",v /n ,episode )
             w .add_scalar ("Loss/local_critic_mean",
-            sum (self .critic_loss_sums )/len (self .critic_loss_sums )/n 
+            sum (self .critic_loss_sums )/len (self .critic_loss_sums )/n
             if self .critic_loss_sums else 0.0 ,episode )
+            if _verbose :
+                for i ,v in enumerate (self .critic_loss_sums ):
+                    w .add_scalar (f"Loss/local_critic_agent{i+1}",v /n ,episode )
+                for i ,v in enumerate (self .actor_loss_sums ):
+                    w .add_scalar (f"Loss/actor_agent{i+1}",v /n ,episode )
 
-            
         if self .clip_step_count >0 :
-            n =self .clip_step_count 
-            for i ,v in enumerate (self .local_critic_clip_sums ):
-                w .add_scalar (f"Clipping/local_critic_agent{i+1}",v /n ,episode )
+            n =self .clip_step_count
             w .add_scalar ("Clipping/global_critic",self .global_critic_clip_sum /n ,episode )
-            for i ,v in enumerate (self .actor_clip_sums ):
-                w .add_scalar (f"Clipping/actor_agent{i+1}",v /n ,episode )
+            if _verbose :
+                for i ,v in enumerate (self .local_critic_clip_sums ):
+                    w .add_scalar (f"Clipping/local_critic_agent{i+1}",v /n ,episode )
+                for i ,v in enumerate (self .actor_clip_sums ):
+                    w .add_scalar (f"Clipping/actor_agent{i+1}",v /n ,episode )
+
+    def record_agent_state (self ,agent ,training_ep ):
+        """Write replay-buffer and exploration-state metrics to TensorBoard."""
+        if self .tb_writer is None :
+            return
+        if hasattr (agent ,'buf'):
+            buf =agent .buf
+            buf_used =int (getattr (buf ,'size',0 ))
+            buf_cap =int (getattr (buf ,'buf_size',0 ))
+            if buf_cap >0 :
+                self .tb_writer .add_scalar ("Training/buffer_fill_rate",buf_used /buf_cap ,training_ep )
+            if buf_used >0 :
+                self .tb_writer .add_scalar ("Training/buffer_size",buf_used ,training_ep )
+        if hasattr (agent ,'epsilon'):
+            self .tb_writer .add_scalar ("Training/epsilon",float (agent .epsilon ),training_ep )
+        if hasattr (agent ,'ou_noise_scale'):
+            self .tb_writer .add_scalar ("Training/ou_noise_scale",float (agent .ou_noise_scale ),training_ep )
+        if hasattr (agent ,'update_step'):
+            self .tb_writer .add_scalar ("Training/update_step",int (agent .update_step ),training_ep )
 
     def reset_episode_data (self ):
-        "Documentation."
-        self .mode =None 
+        """Clear all per-episode accumulators after TensorBoard emission."""
+        self .mode =None
 
-        self .local_q_agents_sums =[0.0 ]*self .num_stations 
-        self .local_q_mean_sum =0.0 
-        self .global_q_sum =0.0 
-        self .central_q_sum =0.0 
-        self .q_step_count =0 
+        self .local_q_agents_sums =[0.0 ]*self .num_stations
+        self .local_q_mean_sum =0.0
+        self .global_q_sum =0.0
+        self .central_q_sum =0.0
+        self .q_step_count =0
 
-        self .global_critic_grad_sum_before_clip =0.0 
-        self .critic_norms_sums_before_clip =[0.0 ]*self .num_stations 
-        self .actor_norms_sums_before_clip =[0.0 ]*self .num_stations 
-        self .actor_source_local_norm_sums_before_clip =[0.0 ]*self .num_stations 
-        self .actor_source_global_norm_sums_before_clip =[0.0 ]*self .num_stations 
-        self .actor_source_global_ratio_sums =[0.0 ]*self .num_stations 
-        self .actor_source_cos_sums =[0.0 ]*self .num_stations 
-        self .actor_source_cos_valid_sums =[0 ]*self .num_stations 
-        self .actor_source_local_grad_sum_before_clip =0.0 
-        self .actor_source_global_grad_sum_before_clip =0.0 
-        self .actor_source_global_ratio_sum =0.0 
-        self .actor_source_cos_sum =0.0 
-        self .actor_source_cos_valid_fraction_sum =0.0 
-        self .central_critic_grad_sum_before_clip =0.0 
-        self .central_actor_grad_sum_before_clip =0.0 
-        self .grad_step_count =0 
+        self .global_critic_grad_sum_before_clip =0.0
+        self .critic_norms_sums_before_clip =[0.0 ]*self .num_stations
+        self .actor_norms_sums_before_clip =[0.0 ]*self .num_stations
+        self .actor_source_local_norm_sums_before_clip =[0.0 ]*self .num_stations
+        self .actor_source_global_norm_sums_before_clip =[0.0 ]*self .num_stations
+        self .actor_source_global_ratio_sums =[0.0 ]*self .num_stations
+        self .actor_source_cos_sums =[0.0 ]*self .num_stations
+        self .actor_source_cos_valid_sums =[0 ]*self .num_stations
+        self .actor_source_local_grad_sum_before_clip =0.0
+        self .actor_source_global_grad_sum_before_clip =0.0
+        self .actor_source_global_ratio_sum =0.0
+        self .actor_source_cos_sum =0.0
+        self .actor_source_cos_valid_fraction_sum =0.0
+        self .central_critic_grad_sum_before_clip =0.0
+        self .central_actor_grad_sum_before_clip =0.0
+        self .grad_step_count =0
 
-        self .critic_loss_sums =[0.0 ]*self .num_stations 
-        self .global_critic_loss_sum =0.0 
-        self .actor_loss_sums =[0.0 ]*self .num_stations 
-        self .central_critic_loss_sum =0.0 
-        self .central_actor_loss_sum =0.0 
-        self .loss_step_count =0 
+        self .critic_loss_sums =[0.0 ]*self .num_stations
+        self .global_critic_loss_sum =0.0
+        self .actor_loss_sums =[0.0 ]*self .num_stations
+        self .central_critic_loss_sum =0.0
+        self .central_actor_loss_sum =0.0
+        self .loss_step_count =0
 
-        self .local_critic_clip_sums =[0 ]*self .num_stations 
-        self .global_critic_clip_sum =0 
-        self .actor_clip_sums =[0 ]*self .num_stations 
-        self .central_critic_clip_sum =0 
-        self .central_actor_clip_sum =0 
-        self .clip_step_count =0 
+        self .local_critic_clip_sums =[0 ]*self .num_stations
+        self .global_critic_clip_sum =0
+        self .actor_clip_sums =[0 ]*self .num_stations
+        self .central_critic_clip_sum =0
+        self .central_actor_clip_sum =0
+        self .clip_step_count =0
 
-        self .local_critic_grad_sum =0.0 
-        self .global_critic_grad_sum =0.0 
+        self .local_critic_grad_sum =0.0
+        self .global_critic_grad_sum =0.0
 
 
-        
-        
-        
+
+
+
 def plot_arrival_counts (all_episode_data :dict ,
 results_dir :str ,
 title_prefix :str ="")->None :
-    "Documentation."
+    """
+    Plot and export the number of EV arrivals per step.
+
+    If arrivals are station-resolved, the CSV includes per-station counts and
+    the plot highlights representative station profiles. Initial seeded EVs are
+    subtracted from step 1 so the figure reflects new arrivals only.
+    """
     episode_keys =sorted (all_episode_data .keys ())
     if len (episode_keys )==0 :
-        return 
+        return
 
     ep_key =episode_keys [-1 ]
     ep =all_episode_data [ep_key ]
 
     if 'arrivals_per_step'not in ep or len (ep ['arrivals_per_step'])==0 :
-        return 
+        return
 
     raw_arrivals =ep ['arrivals_per_step']
 
-    
+
     is_vector =any (isinstance (v ,(list ,tuple ,np .ndarray ))for v in raw_arrivals )
     if is_vector :
-    
+
         rows =[]
-        max_s =0 
+        max_s =0
         for v in raw_arrivals :
             if isinstance (v ,(list ,tuple ,np .ndarray )):
                 arr =np .asarray (v ,dtype =float ).reshape (-1 )
@@ -1318,17 +1365,17 @@ title_prefix :str ="")->None :
             max_s =max (max_s ,int (arr .size ))
             rows .append (arr )
         T =len (rows )
-        S =max_s 
+        S =max_s
         arrivals_by_station =np .zeros ((T ,S ),dtype =float )
         for t ,arr in enumerate (rows ):
             n =min (S ,int (arr .size ))
             if n >0 :
                 arrivals_by_station [t ,:n ]=arr [:n ]
 
-                
+
         if arrivals_by_station .shape [0 ]>0 and INITIAL_EVS_PER_STATION >0 :
             arrivals_by_station [0 ,:]=np .maximum (
-            arrivals_by_station [0 ,:]-float (INITIAL_EVS_PER_STATION ),0.0 
+            arrivals_by_station [0 ,:]-float (INITIAL_EVS_PER_STATION ),0.0
             )
 
         arrivals_total =arrivals_by_station .sum (axis =1 )
@@ -1342,7 +1389,7 @@ title_prefix :str ="")->None :
                 arrivals_list .append (0.0 )
         arrivals_total =np .asarray (arrivals_list ,dtype =float )
         if arrivals_total .size >0 :
-            initial_seed_total =INITIAL_EVS_PER_STATION *NUM_STATIONS 
+            initial_seed_total =INITIAL_EVS_PER_STATION *NUM_STATIONS
             if initial_seed_total >0 :
                 arrivals_total [0 ]=max (arrivals_total [0 ]-initial_seed_total ,0.0 )
         steps =np .arange (1 ,len (arrivals_total )+1 )
@@ -1350,9 +1397,9 @@ title_prefix :str ="")->None :
     title_prefix_en =title_prefix
 
     if is_vector :
-    
+
         try :
-            from pathlib import Path 
+            from pathlib import Path
             from Config import (
             PER_STATION_ARRIVAL_PROFILE_PATHS ,
             )
@@ -1362,19 +1409,19 @@ title_prefix :str ="")->None :
         S =int (arrivals_by_station .shape [1 ])
         if len (PER_STATION_ARRIVAL_PROFILE_PATHS )<S :
             print ("[plot_arrival_counts] per-station arrival profiles are required; skipping grouped plot.")
-            return 
+            return
         profile_paths =list (PER_STATION_ARRIVAL_PROFILE_PATHS [:S ])
 
-        
+
         groups ={}
         for st ,pth in enumerate (profile_paths ):
             groups .setdefault (str (pth ),[]).append (st )
 
-            
+
         group_items =[]
         for pth ,sts in groups .items ():
-            group_total =float (arrivals_by_station [:,sts ].sum ())if sts else 0.0 
-            rep =int (sts [0 ])if sts else 0 
+            group_total =float (arrivals_by_station [:,sts ].sum ())if sts else 0.0
+            rep =int (sts [0 ])if sts else 0
             group_items .append ((group_total ,pth ,rep ,sts ))
         group_items .sort (reverse =True ,key =lambda x :x [0 ])
         selected =group_items [:5 ]
@@ -1398,7 +1445,7 @@ title_prefix :str ="")->None :
         fig .suptitle (f"{title_prefix_en} Arrivals per Step (by station, Episode {ep_key})".strip (),fontsize =18 )
         fig .tight_layout ()
     else :
-    
+
         fig ,ax =plt .subplots (figsize =(20 ,10 ))
         ax .bar (steps ,arrivals_total ,color ='skyblue',alpha =0.6 ,label ='New Arrivals (bar)')
         ax .plot (steps ,arrivals_total ,color ='navy',linewidth =3 ,marker ='o',markersize =6 ,label ='New Arrivals (line)')
@@ -1416,9 +1463,9 @@ title_prefix :str ="")->None :
 
     fig .savefig (os .path .join (results_dir ,fname ),dpi =140 ,bbox_inches ='tight')
     plt .close (fig )
-    
 
-    
+
+
     csv_filename =fname .replace ('.png','.csv')
     csv_path =os .path .join (results_dir ,csv_filename )
     with open (csv_path ,'w',newline ='',encoding ='utf-8')as f :
@@ -1427,7 +1474,7 @@ title_prefix :str ="")->None :
         for i ,value in enumerate (arrivals_total ):
             writer .writerow ([i +1 ,int (value )])
 
-            
+
     if is_vector :
         by_station_csv =csv_filename .replace ('.csv','_by_station.csv')
         by_station_path =os .path .join (results_dir ,by_station_csv )
@@ -1438,59 +1485,65 @@ title_prefix :str ="")->None :
             for t in range (int (arrivals_by_station .shape [0 ])):
                 row =[t +1 ]+[int (x )for x in arrivals_by_station [t ,:]]+[int (arrivals_total [t ])]
                 writer .writerow (row )
-                
 
 
-                
-                
-                
+
+
+
+
 def plot_power_mismatch_analysis (all_episode_data :dict ,
 results_dir :str ,
 title_prefix :str ="")->None :
-    "Documentation."
-    
+    """
+    Plot per-step and cumulative dispatch mismatch.
+
+    Mismatch is `grid request - actual EV power`. Positive values indicate an
+    unmet request; negative values indicate excess EV response. The cumulative
+    curve converts kW mismatch into kWh via `POWER_TO_ENERGY`.
+    """
+
     episode_keys =sorted (all_episode_data .keys ())
     if len (episode_keys )==0 :
-        return 
+        return
 
     ep_key =episode_keys [-1 ]
     ep =all_episode_data [ep_key ]
 
     if 'power_mismatch'not in ep or len (ep ['power_mismatch'])==0 :
-        return 
+        return
 
     mismatches =np .array (ep ['power_mismatch'])
     steps =np .arange (1 ,len (mismatches )+1 )
 
-    
+
     max_over_idx =np .argmax (mismatches )
     max_under_idx =np .argmin (mismatches )
     max_over_value =mismatches [max_over_idx ]
     max_under_value =mismatches [max_under_idx ]
 
-    
-    energy_mismatches =mismatches *POWER_TO_ENERGY 
+
+    energy_mismatches =mismatches *POWER_TO_ENERGY
     cumulative_energy =np .cumsum (energy_mismatches )
 
-    
+
     max_cumulative_idx =np .argmax (np .abs (cumulative_energy ))
     max_cumulative_value =cumulative_energy [max_cumulative_idx ]
 
-    
+
     title_prefix_en =title_prefix
 
-    
+
     fig ,(ax1 ,ax2 )=plt .subplots (2 ,1 ,figsize =(20 ,16 ))
 
-    
+
     colors =['red'if m >0 else 'blue'for m in mismatches ]
     ax1 .bar (steps ,mismatches ,color =colors ,alpha =0.6 ,width =0.8 )
 
-    
+
     ax1 .bar (max_over_idx ,max_over_value ,color ='darkred',alpha =0.9 ,width =0.8 )
     ax1 .bar (max_under_idx ,max_under_value ,color ='darkblue',alpha =0.9 ,width =0.8 )
 
-    
+
     ax1 .text (max_over_idx ,max_over_value ,
     f'Max Shortage\nStep {max_over_idx+1}\n{max_over_value:.1f} kW',
     ha ='center',va ='bottom',fontsize =24 ,color ='darkred',fontweight ='bold')
@@ -1501,15 +1554,15 @@ title_prefix :str ="")->None :
     ax1 .axhline (0 ,color ='black',linewidth =2 ,alpha =0.5 )
     ax1 .set_xlabel ('Step',fontsize =30 )
     ax1 .set_ylabel ('Mismatch [kW]\n(Request - Actual)',fontsize =30 )
-    
-    
+
+
     ax1 .grid (alpha =0.3 ,linewidth =2 )
 
-    
+
     ax2 .plot (steps ,cumulative_energy ,linewidth =4 ,color ='purple',alpha =0.8 )
     ax2 .fill_between (steps ,0 ,cumulative_energy ,alpha =0.3 ,color ='purple')
 
-    
+
     ax2 .plot (max_cumulative_idx ,max_cumulative_value ,'o',
     markersize =20 ,color ='darkred',zorder =5 )
     ax2 .text (max_cumulative_idx ,max_cumulative_value ,
@@ -1520,13 +1573,13 @@ title_prefix :str ="")->None :
     ax2 .axhline (0 ,color ='black',linewidth =2 ,alpha =0.5 )
     ax2 .set_xlabel ('Step',fontsize =30 )
     ax2 .set_ylabel ('Cumulative Energy Mismatch [kWh]',fontsize =30 )
-    
-    
+
+
     ax2 .grid (alpha =0.3 ,linewidth =2 )
 
     fig .tight_layout ()
 
-    
+
     fname =f"power_mismatch_analysis_episode_{ep_key}.png"
     if title_prefix :
         prefix_clean =title_prefix .lower ().replace (' ','_')
@@ -1534,9 +1587,9 @@ title_prefix :str ="")->None :
 
     fig .savefig (os .path .join (results_dir ,fname ),dpi =140 ,bbox_inches ='tight')
     plt .close (fig )
-    
 
-    
+
+
     csv_filename =fname .replace ('.png','.csv')
     csv_path =os .path .join (results_dir ,csv_filename )
     with open (csv_path ,'w',newline ='',encoding ='utf-8')as f :
@@ -1544,17 +1597,23 @@ title_prefix :str ="")->None :
         writer .writerow (['Step','Mismatch_kW','Cumulative_Energy_kWh'])
         for i in range (len (steps )):
             writer .writerow ([i +1 ,mismatches [i ],cumulative_energy [i ]])
-            
+
 
 
 def plot_reward_breakdown (all_episode_data :dict ,
 results_dir :str ,
 title_prefix :str ="")->None :
-    "Documentation."
-    
+    """
+    Plot local and global reward components over time.
+
+    Local components include progress shaping, departure reward, discharge
+    penalty, and station-limit penalty when present. The global component is the
+    demand-balance reward.
+    """
+
     title_prefix_en =title_prefix
 
-    
+
     episode_keys =sorted (all_episode_data .keys ())
     if len (episode_keys )>2 :
         episode_keys =episode_keys [-2 :]
@@ -1562,9 +1621,9 @@ title_prefix :str ="")->None :
     for ep_key in episode_keys :
         ep =all_episode_data [ep_key ]
 
-        
+
         if 'rewards_global_balance'not in ep :
-            continue 
+            continue
 
         steps =np .arange (1 ,len (ep ['rewards_global_balance'])+1 )
         local_shaping =np .asarray (ep ['rewards_local_shaping'],dtype =float )
@@ -1578,7 +1637,7 @@ title_prefix :str ="")->None :
 
         fig ,(ax1 ,ax2 )=plt .subplots (2 ,1 ,figsize =(20 ,16 ),sharex =True )
 
-        
+
         ax1 .plot (steps ,local_shaping ,label ='Local Shaping',color ='cyan',lw =3 ,alpha =0.8 )
         ax1 .plot (steps ,local_departure ,label ='Local Departure',color ='orange',lw =4 ,marker ='o',markersize =4 ,ls ='None')
         ax1 .plot (steps ,local_discharge_penalty ,label ='Local Discharge Penalty',color ='red',lw =2 ,alpha =0.6 )
@@ -1592,11 +1651,11 @@ title_prefix :str ="")->None :
         linewidth =0 ,
         )
 
-        
-        local_total =local_shaping +local_departure +local_discharge_penalty +local_station_limit_penalty 
+
+        local_total =local_shaping +local_departure +local_discharge_penalty +local_station_limit_penalty
         ax1 .plot (steps ,local_total ,label ='Local Total (Sum)',color ='green',lw =2 ,ls ='--',alpha =0.5 )
 
-        
+
         all_local_vals =np .concatenate ([
         local_shaping ,
         local_departure ,
@@ -1606,44 +1665,44 @@ title_prefix :str ="")->None :
         ])
         if len (all_local_vals )>0 :
             v_min ,v_max =np .min (all_local_vals ),np .max (all_local_vals )
-            
+
             if v_min ==v_max :
                 ax1 .set_ylim (v_min -1.0 ,v_max +1.0 )
             else :
-                margin =(v_max -v_min )*0.1 
+                margin =(v_max -v_min )*0.1
                 ax1 .set_ylim (v_min -margin ,v_max +margin )
 
         ax1 .set_ylabel ('Local Reward Components',fontsize =26 )
-        
+
         ax1 .grid (alpha =0.3 ,lw =1.5 )
         ax1 .legend (loc ='upper left',fontsize =18 )
         ax1 .axhline (0 ,color ='black',lw =2 ,alpha =0.5 )
 
-        
+
         ax2 .plot (steps ,global_balance ,label ='Global Balance',color ='blue',lw =4 )
 
-        
+
         if len (global_balance )>0 :
             gv_min ,gv_max =np .min (global_balance ),np .max (global_balance )
             if gv_min ==gv_max :
                 ax2 .set_ylim (gv_min -1.0 ,gv_max +1.0 )
             else :
-                margin =(gv_max -gv_min )*0.1 
+                margin =(gv_max -gv_min )*0.1
                 ax2 .set_ylim (gv_min -margin ,gv_max +margin )
 
         ax2 .set_xlabel ('Step',fontsize =26 )
         ax2 .set_ylabel ('Global Reward Components',fontsize =26 )
-        
+
         ax2 .grid (alpha =0.3 ,lw =1.5 )
         ax2 .legend (loc ='upper left',fontsize =18 )
         ax2 .axhline (0 ,color ='black',lw =2 ,alpha =0.5 )
 
-        
-        
+
+
 
         fig .tight_layout (rect =[0 ,0.03 ,1 ,0.95 ])
 
-        
+
         fname =f"reward_breakdown_episode_{ep_key}.png"
         if title_prefix :
             prefix_clean =title_prefix_en .lower ().replace (' ','_')
@@ -1651,9 +1710,9 @@ title_prefix :str ="")->None :
 
         fig .savefig (os .path .join (results_dir ,fname ),dpi =140 ,bbox_inches ='tight')
         plt .close (fig )
-        
 
-        
+
+
         csv_filename =fname .replace ('.png','.csv')
         csv_path =os .path .join (results_dir ,csv_filename )
         with open (csv_path ,'w',newline ='',encoding ='utf-8')as f :
@@ -1675,34 +1734,39 @@ title_prefix :str ="")->None :
                 local_discharge_penalty [i ],
                 local_station_limit_penalty [i ],
                 ])
-                
 
 
-                
-                
-                
+
+
+
+
 def snapshot_code_to_archive (model_dir :str ,project_root :str =None )->str :
-    "Documentation."
+    """
+    Copy source files into `model_dir/code_snapshot` for reproducibility.
+
+    Each training archive stores the code used to produce it, making later
+    result review independent of subsequent edits in the working tree.
+    """
     root =project_root or os .getcwd ()
     snapshot_dir =os .path .join (model_dir ,"code_snapshot")
     os .makedirs (snapshot_dir ,exist_ok =True )
 
-    
+
     dirs_to_copy =["training","environment","tools","data"]
     for d in dirs_to_copy :
         src =os .path .join (root ,d )
         dst =os .path .join (snapshot_dir ,d )
         if os .path .isdir (src ):
-        
+
             def _ignore (dirpath ,names ):
                 ignored =set ()
                 base =os .path .basename (dirpath )
                 if base in {"__pycache__",".git",".idea",".vscode",".venv",".pytest_cache",".mypy_cache"}:
                     ignored .update (names )
-                return ignored 
+                return ignored
             shutil .copytree (src ,dst ,dirs_exist_ok =True ,ignore =_ignore )
 
-            
+
     root_files =[
     fn for fn in os .listdir (root )
     if os .path .isfile (os .path .join (root ,fn ))
@@ -1715,34 +1779,34 @@ def snapshot_code_to_archive (model_dir :str ,project_root :str =None )->str :
             try :
                 shutil .copy2 (src ,dst )
             except Exception :
-            
-                pass 
 
-                
-                
-
-    return snapshot_dir 
+                pass
 
 
-    
-    
-    
-def _plot_ev_soc_with_dispatch_from_csv_fallback (
+
+
+    return snapshot_dir
+
+
+
+
+
+def _plot_ev_soc_with_dispatch_from_csv_impl (
 ev_soc_csv_path ,
 out_dir =None ,
 start_step =None ,
 end_step =None ,
 dispatch_csv_path =None ,
 ):
-    """Internal fallback plotter when Graphs.EV_SOC_Dispatch is unavailable."""
-    from pathlib import Path 
+    """Internal implementation for EV SoC and dispatch plots from CSV files."""
+    from pathlib import Path
 
     ev_soc_csv_path =Path (ev_soc_csv_path )
-    out_dir =Path (out_dir )if out_dir else ev_soc_csv_path .parent 
-    dispatch_csv_path =Path (dispatch_csv_path )if dispatch_csv_path else None 
+    out_dir =Path (out_dir )if out_dir else ev_soc_csv_path .parent
+    dispatch_csv_path =Path (dispatch_csv_path )if dispatch_csv_path else None
     out_dir .mkdir (parents =True ,exist_ok =True )
 
-    
+
     ev_rows ={}
     with open (ev_soc_csv_path ,"r",encoding ="utf-8",newline ="")as f :
         reader =csv .DictReader (f )
@@ -1750,29 +1814,29 @@ dispatch_csv_path =None ,
             try :
                 step =int (float (row .get ("Step",0 )))
             except Exception :
-                continue 
+                continue
             ev_id =str (row .get ("EV_ID","EV"))
             try :
                 soc =float (row .get ("SoC_%",np .nan ))
             except Exception :
-                soc =np .nan 
+                soc =np .nan
             try :
                 target =float (row .get ("Target_%",np .nan ))
             except Exception :
-                target =np .nan 
+                target =np .nan
             dep_raw =row .get ("Departure_Step","")
             try :
-                departure =int (float (dep_raw ))if str (dep_raw ).strip ()not in {"","N/A","None","nan"}else None 
+                departure =int (float (dep_raw ))if str (dep_raw ).strip ()not in {"","N/A","None","nan"}else None
             except Exception :
-                departure =None 
+                departure =None
 
             d =ev_rows .setdefault (ev_id ,{"step":[],"soc":[],"target":target ,"departure":departure })
             d ["step"].append (step )
             d ["soc"].append (soc )
             if np .isfinite (target ):
-                d ["target"]=target 
+                d ["target"]=target
             if departure is not None :
-                d ["departure"]=departure 
+                d ["departure"]=departure
 
     if not ev_rows :
         raise ValueError (f"No EV SoC rows found in {ev_soc_csv_path}")
@@ -1784,17 +1848,17 @@ dispatch_csv_path =None ,
     lo =all_steps [0 ]if start_step is None else int (start_step )
     hi =all_steps [-1 ]if end_step is None else int (end_step )
     if hi <lo :
-        lo ,hi =hi ,lo 
+        lo ,hi =hi ,lo
 
     fig ,ax1 =plt .subplots (figsize =(14 ,8 ))
-    target_label_shown =False 
+    target_label_shown =False
     for ev_id in sorted (ev_rows .keys (),key =lambda x :(len (x ),x )):
         d =ev_rows [ev_id ]
         s =np .asarray (d ["step"],dtype =int )
         y =np .asarray (d ["soc"],dtype =float )
         m =(s >=lo )&(s <=hi )&np .isfinite (y )
         if not np .any (m ):
-            continue 
+            continue
         line ,=ax1 .plot (s [m ],y [m ],label =f"EV {ev_id}",alpha =0.95 ,lw =2.8 )
         if d .get ("departure")is not None and lo <=d ["departure"]<=hi :
             ax1 .axvline (d ["departure"],color ="gray",ls ="--",alpha =0.25 ,lw =1.2 )
@@ -1811,7 +1875,7 @@ dispatch_csv_path =None ,
             alpha =0.85 ,
             label ="Target SoC"if not target_label_shown else None ,
             )
-            target_label_shown =True 
+            target_label_shown =True
 
     ax1 .set_xlim (lo ,hi )
     ax1 .set_ylim (0 ,100 )
@@ -1819,17 +1883,17 @@ dispatch_csv_path =None ,
     ax1 .set_ylabel ("SoC (%)")
     ax1 .grid (True ,alpha =0.3 )
 
-    
+
     if dispatch_csv_path and dispatch_csv_path .exists ():
         disp_x ,disp_y =[],[]
         with open (dispatch_csv_path ,"r",encoding ="utf-8",newline ="")as f :
             reader =csv .DictReader (f )
             fields =[c for c in (reader .fieldnames or [])if c ]
-            step_col =None 
+            step_col =None
             for c in fields :
                 if c .lower ()=="step":
-                    step_col =c 
-                    break 
+                    step_col =c
+                    break
             if step_col is None and fields :
                 step_col =fields [0 ]
 
@@ -1841,24 +1905,24 @@ dispatch_csv_path =None ,
             "request",
             "value",
             ]
-            val_col =None 
+            val_col =None
             lower_to_orig ={c .lower ():c for c in fields }
             for name in val_candidates :
                 if name in lower_to_orig :
                     val_col =lower_to_orig [name ]
-                    break 
+                    break
             if val_col is None :
                 for c in fields :
                     if c !=step_col :
-                        val_col =c 
-                        break 
+                        val_col =c
+                        break
 
             for row in reader :
                 try :
                     sx =int (float (row .get (step_col ,np .nan )))
                     sy =float (row .get (val_col ,np .nan ))
                 except Exception :
-                    continue 
+                    continue
                 if np .isfinite (sx )and np .isfinite (sy )and lo <=sx <=hi :
                     disp_x .append (sx )
                     disp_y .append (sy )
@@ -1871,8 +1935,8 @@ dispatch_csv_path =None ,
             y_neg =np .where (disp_y <0.0 ,disp_y ,np .nan )
             ax2 .plot (disp_x ,y_pos ,color ="tab:red",lw =3.2 ,alpha =0.9 ,label ="Dispatch (+)")
             ax2 .plot (disp_x ,y_neg ,color ="tab:blue",lw =3.2 ,alpha =0.9 ,label ="Dispatch (-)")
-            pos =disp_y >0 
-            neg =disp_y <0 
+            pos =disp_y >0
+            neg =disp_y <0
             if np .any (pos ):
                 ax2 .fill_between (disp_x ,0 ,disp_y ,where =pos ,color ="tab:red",alpha =0.18 )
             if np .any (neg ):
@@ -1892,7 +1956,7 @@ dispatch_csv_path =None ,
     plt .close (fig )
 
     legend_path =out_dir /f"{ev_soc_csv_path.stem}_legend.png"
-    return graph_path ,legend_path 
+    return graph_path ,legend_path
 
 
 def plot_ev_soc_with_dispatch_from_csv (
@@ -1903,18 +1967,16 @@ end_step :int =None ,
 dispatch_csv_path :str =None ,
 ):
     """
-    Plot EV SoC and Dispatch signal value from CSV files.
-
-    First tries Graphs.EV_SOC_Dispatch, then falls back to an internal implementation.
+    Plot EV SoC and dispatch signal values from CSV files.
     """
-    from pathlib import Path 
+    from pathlib import Path
 
     ev_soc_csv_path =Path (ev_soc_csv_path )
-    out_dir =Path (out_dir )if out_dir else None 
-    dispatch_csv_path =Path (dispatch_csv_path )if dispatch_csv_path else None 
+    out_dir =Path (out_dir )if out_dir else None
+    dispatch_csv_path =Path (dispatch_csv_path )if dispatch_csv_path else None
 
 
-    return _plot_ev_soc_with_dispatch_from_csv_fallback (
+    return _plot_ev_soc_with_dispatch_from_csv_impl (
         ev_soc_csv_path =ev_soc_csv_path ,
         out_dir =out_dir ,
         start_step =start_step ,
@@ -1923,67 +1985,272 @@ dispatch_csv_path :str =None ,
         )
 
 
-        
-        
-        
+import signal as _signal_module
 
-import socket as _socket 
-import urllib .request as _urllib_request 
-import urllib .error as _urllib_error 
+
+class InterruptHandler :
+    """Handle Ctrl+C and allow the training loop to stop safely."""
+
+    def __init__ (self ):
+        self ._interrupted =False
+
+    def setup (self ):
+        self ._interrupted =False
+        _signal_module .signal (_signal_module .SIGINT ,self ._handler )
+
+    def reset (self ):
+        self ._interrupted =False
+
+    def _handler (self ,sig ,frame ):
+        self ._interrupted =True
+        print ("\n[Info] Ctrl+C: Training will stop after the current episode.",flush =True )
+
+    def is_interrupted (self ):
+        return self ._interrupted
+
+
+def launch_tensorboard (log_dir ,max_retries =3 ,port =6006 ):
+    """Launch TensorBoard and open it in a browser when available."""
+    import sys
+    import socket
+    import subprocess
+    import webbrowser
+    import time as _time
+
+    def check_port_available (p ):
+        sock =socket .socket (socket .AF_INET ,socket .SOCK_STREAM )
+        try :
+            sock .bind (('localhost',p ))
+            sock .close ()
+            return True
+        except OSError :
+            return False
+
+    def find_available_port (start_port =6006 ,max_attempts =10 ):
+        for p in range (start_port ,start_port +max_attempts ):
+            if check_port_available (p ):
+                return p
+        return None
+
+    def check_tensorboard_running (p ,max_wait =30 ):
+        import urllib .request
+        import urllib .error
+        url =f"http://localhost:{p}"
+        for _ in range (max_wait ):
+            try :
+                response =urllib .request .urlopen (url ,timeout =1 )
+                if response .getcode ()==200 :
+                    return True
+            except (urllib .error .URLError ,socket .timeout ,ConnectionRefusedError ):
+                _time .sleep (1 )
+        return False
+
+    for attempt in range (max_retries ):
+        try :
+            if not check_port_available (port ):
+                try :
+                    import psutil
+                    killed =False
+                    for proc in psutil .process_iter (['pid','name','cmdline']):
+                        try :
+                            cmdline =proc .info .get ('cmdline',[])
+                            if cmdline and any ('tensorboard'in str (arg ).lower ()for arg in cmdline ):
+                                if str (port )in ' '.join (str (arg )for arg in cmdline ):
+                                    proc .terminate ()
+                                    try :
+                                        proc .wait (timeout =3 )
+                                    except psutil .TimeoutExpired :
+                                        proc .kill ()
+                                    killed =True
+                                    _time .sleep (1 )
+                                    break
+                        except (psutil .NoSuchProcess ,psutil .AccessDenied ,psutil .ZombieProcess ):
+                            continue
+                    if killed :
+                        if not check_port_available (port ):
+                            new_port =find_available_port (port +1 )
+                            if new_port :
+                                port =new_port
+                    else :
+                        new_port =find_available_port (port +1 )
+                        if new_port :
+                            port =new_port
+                except ImportError :
+                    new_port =find_available_port (port +1 )
+                    if new_port :
+                        port =new_port
+                except Exception :
+                    new_port =find_available_port (port +1 )
+                    if new_port :
+                        port =new_port
+
+            if not check_port_available (port )and attempt <max_retries -1 :
+                new_port =find_available_port (port +1 )
+                if new_port :
+                    port =new_port
+
+            cmd =[sys .executable ,"-m","tensorboard.main","--logdir",log_dir ,"--port",str (port )]
+            process =subprocess .Popen (
+            cmd ,
+            stdout =subprocess .PIPE ,
+            stderr =subprocess .PIPE ,
+            creationflags =subprocess .CREATE_NO_WINDOW if sys .platform =='win32'else 0
+            )
+
+            if check_tensorboard_running (port ,max_wait =30 ):
+                try :
+                    webbrowser .open (f"http://localhost:{port}")
+                except Exception :
+                    webbrowser .open (f"http://localhost:{port}")
+                return process
+            else :
+                try :
+                    process .terminate ()
+                    process .wait (timeout =2 )
+                except Exception :
+                    try :
+                        process .kill ()
+                    except Exception :
+                        pass
+                if attempt <max_retries -1 :
+                    new_port =find_available_port (port +1 )
+                    if new_port :
+                        port =new_port
+                    _time .sleep (2 )
+
+        except FileNotFoundError :
+            return None
+        except Exception :
+            if attempt <max_retries -1 :
+                new_port =find_available_port (port +1 )
+                if new_port :
+                    port =new_port
+                _time .sleep (2 )
+
+    print (f"  python -m tensorboard.main --logdir {log_dir} --port {port}")
+    return None
+
+
+def write_train_episode_tb_scalars (
+tb_writer ,
+training_ep ,
+steps_in_ep ,
+*,
+ep_local_r ,
+ep_global_r ,
+soc_miss_rate ,
+surplus_absorption_rate ,
+supply_cooperation_rate ,
+avg_switches =0.0 ,
+station_limit_steps =0 ,
+station_limit_penalty_total =0.0 ,
+ep_local_departure_r =0.0 ,
+ep_local_progress_shaping_r =0.0 ,
+ep_local_discharge_penalty_r =0.0 ,
+ep_local_switch_penalty_r =0.0 ,
+ep_local_station_limit_penalty_r =0.0 ,
+station_local_reward_sums =None ,
+enable_switch_metrics =False ,
+enable_stlimit_metrics =False ,
+):
+    """Write per-episode reward, metric, and penalty scalars to TensorBoard."""
+    from Config import TB_VERBOSE
+
+    if tb_writer is None :
+        return
+
+    n =max (steps_in_ep ,1 )
+
+    tb_writer .add_scalar ("Reward/local",ep_local_r /n ,training_ep )
+    tb_writer .add_scalar ("Reward/global",ep_global_r /n ,training_ep )
+    tb_writer .add_scalar ("Metrics/soc_hit_rate",100 -soc_miss_rate ,training_ep )
+    tb_writer .add_scalar ("Metrics/surplus_absorption_rate",surplus_absorption_rate ,training_ep )
+    tb_writer .add_scalar ("Metrics/supply_cooperation_rate",supply_cooperation_rate ,training_ep )
+
+    if enable_switch_metrics :
+        tb_writer .add_scalar ("Metrics/avg_switches",avg_switches ,training_ep )
+    if enable_stlimit_metrics :
+        tb_writer .add_scalar ("Metrics/station_limit_steps",station_limit_steps ,training_ep )
+        tb_writer .add_scalar ("Metrics/station_limit_penalty_total",station_limit_penalty_total ,training_ep )
+
+    if TB_VERBOSE :
+        tb_writer .add_scalar ("Reward/local_departure",ep_local_departure_r /n ,training_ep )
+        tb_writer .add_scalar ("Reward/local_shaping",ep_local_progress_shaping_r /n ,training_ep )
+        tb_writer .add_scalar ("Reward/local_discharge_penalty",ep_local_discharge_penalty_r /n ,training_ep )
+        if enable_switch_metrics :
+            tb_writer .add_scalar ("Reward/local_switch_penalty",ep_local_switch_penalty_r /n ,training_ep )
+        if enable_stlimit_metrics :
+            tb_writer .add_scalar ("Reward/local_station_limit_penalty",ep_local_station_limit_penalty_r /n ,training_ep )
+        if station_local_reward_sums :
+            for st_idx ,sums in enumerate (station_local_reward_sums ):
+                st_id =st_idx +1
+                tb_writer .add_scalar (f"Reward/local_station{st_id}_total",sums ["total"]/n ,training_ep )
+                tb_writer .add_scalar (f"Reward/local_station{st_id}_departure",sums ["departure"]/n ,training_ep )
+                tb_writer .add_scalar (f"Reward/local_station{st_id}_shaping",sums ["progress_shaping"]/n ,training_ep )
+                tb_writer .add_scalar (f"Reward/local_station{st_id}_discharge_penalty",sums ["discharge_penalty"]/n ,training_ep )
+
+
+
+
+
+
+import socket as _socket
+import urllib .request as _urllib_request
+import urllib .error as _urllib_error
 
 
 def check_port_available (port ):
-    "Documentation."
+    """Return True if localhost can bind `port`."""
     sock =_socket .socket (_socket .AF_INET ,_socket .SOCK_STREAM )
     try :
         sock .bind (('localhost',port ))
         sock .close ()
-        return True 
+        return True
     except OSError :
-        return False 
+        return False
 
 
 def find_available_port (start_port =6006 ,max_attempts =10 ):
-    "Documentation."
+    """Find the first available localhost port in a short consecutive range."""
     for p in range (start_port ,start_port +max_attempts ):
         if check_port_available (p ):
-            return p 
-    return None 
+            return p
+    return None
 
 
 def check_tensorboard_running (port ,max_wait =30 ):
-    "Documentation."
-    import time as _time 
+    """Poll TensorBoard until the HTTP endpoint responds or the timeout expires."""
+    import time as _time
     url =f"http://localhost:{port}"
     for _ in range (max_wait ):
         try :
             response =_urllib_request .urlopen (url ,timeout =1 )
             if response .getcode ()==200 :
-                return True 
+                return True
         except (_urllib_error .URLError ,_socket .timeout ,ConnectionRefusedError ):
             _time .sleep (1 )
-    return False 
+    return False
 
 
 def runtensorboard_main ():
     """TensorBoard launcher CLI entry point (formerly main() in runtensorboard.py)."""
-    import sys 
-    import subprocess 
-    import webbrowser 
+    import sys
+    import subprocess
+    import webbrowser
 
-    
+
     if len (sys .argv )>1 :
         logdir =sys .argv [1 ].strip ()
     else :
-        logdir =input ("Text.").strip ()
+        logdir =input ("TensorBoard log directory: ").strip ()
         if not logdir :
             sys .exit (1 )
 
-    port =6006 
+    port =6006
     if not check_port_available (port ):
         new_port =find_available_port (port +1 )
         if new_port :
-            port =new_port 
+            port =new_port
         else :
             pass
 
@@ -1998,22 +2265,7 @@ def runtensorboard_main ():
 
     if check_tensorboard_running (port ,max_wait =30 ):
         try :
-            if sys .platform =='win32':
-                chrome_paths =[
-                'C:/Program Files/Google/Chrome/Application/chrome.exe',
-                'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-                os .path .expanduser ('~/AppData/Local/Google/Chrome/Application/chrome.exe'),
-                ]
-                chrome_opened =False 
-                for chrome_path in chrome_paths :
-                    if os .path .exists (chrome_path ):
-                        subprocess .Popen ([chrome_path ,f"http://localhost:{port}"])
-                        chrome_opened =True 
-                        break 
-                if not chrome_opened :
-                    webbrowser .open (f"http://localhost:{port}")
-            else :
-                webbrowser .get ('google-chrome').open (f"http://localhost:{port}")
+            webbrowser .open (f"http://localhost:{port}")
         except Exception as e :
             webbrowser .open (f"http://localhost:{port}")
     else :

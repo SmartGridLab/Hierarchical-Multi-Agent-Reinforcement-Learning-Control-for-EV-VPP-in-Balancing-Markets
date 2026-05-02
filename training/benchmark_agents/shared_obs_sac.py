@@ -50,7 +50,7 @@ _LEAKY_GAIN =nn .init .calculate_gain ("leaky_relu",0.1 )
 
 
 class CentralizedGaussianActor (nn .Module ):
-    "Documentation."
+    """Gaussian policy over the full multi-station action vector."""
 
     LOG_STD_MIN =-20 
     LOG_STD_MAX =2 
@@ -106,7 +106,7 @@ class CentralizedGaussianActor (nn .Module ):
         
 
     def sample (self ,global_obs ):
-        "Documentation."
+        """Sample a squashed Gaussian action and its log probability."""
         mean ,log_std ,squeeze =self ._backbone (global_obs )
         std =log_std .exp ()
 
@@ -346,7 +346,7 @@ class SharedObsSAC :
             
 
     def act (self ,state ,env =None ,noise =True ):
-        "Documentation."
+        """Return deterministic or sampled actions for the centralized SAC agent."""
         if self .test_mode :
             noise =False 
 

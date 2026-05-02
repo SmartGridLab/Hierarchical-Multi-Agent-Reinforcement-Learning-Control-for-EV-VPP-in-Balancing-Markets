@@ -1,6 +1,6 @@
 
 
-"Documentation."
+"""Convert ACN session JSON files into dwell-time and required-SoC tables."""
 
 import json 
 from pathlib import Path 
@@ -19,7 +19,7 @@ def _to_dt_utc (series ):
     return pd .to_datetime (series ,utc =True ,errors ="coerce")
 
 def latest_user_input (uinputs ):
-    "Documentation."
+    """Return the latest user input record attached to one charging session."""
     if not isinstance (uinputs ,list )or len (uinputs )==0 :
         return {}
     try :
@@ -35,13 +35,13 @@ def latest_user_input (uinputs ):
         return uinputs [-1 ]
 
 def quantize_minutes (value_min ,step =5 ):
-    "Documentation."
+    """Round a duration in minutes to the nearest configured step."""
     if pd .isna (value_min ):
         return None 
     return int (round (float (value_min )/step )*step )
 
 def compute_required_kwh (row ):
-    "Documentation."
+    """Infer requested energy from user input, mileage request, or delivered kWh."""
     ui =row .get ("_latest_ui",{})or {}
     
     kwh_req =ui .get ("kWhRequested",None )
@@ -77,7 +77,7 @@ def compute_required_kwh (row ):
     return val 
 
 def _load_json_payload (path :Path )->dict :
-    "Documentation."
+    """Load a JSON payload and repair a few common truncated-export endings."""
     text =path .read_text (encoding ="utf-8")
     try :
         return json .loads (text )
@@ -105,7 +105,7 @@ def _load_json_payload (path :Path )->dict :
 
 
 def process_sessions (input_json :Path )->pd .DataFrame :
-    "Documentation."
+    """Create the EV profile rows used by the environment sampler."""
     payload =_load_json_payload (input_json )
 
     items =payload .get ("_items",payload )

@@ -3,9 +3,10 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 大きいテスト成果物だけ無視（例）
+# 大きいテスト成果物だけ無視
 archive/**/runs
 archive/**/performance
+archive/**/code_snapshots/data
 # Temporary scripts
 __tmp_*.py
 

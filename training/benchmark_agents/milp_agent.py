@@ -1,8 +1,15 @@
-import torch 
-import numpy as np 
+"""
+
+
+
+
+- MILPAgent(max_evs_per_station, horizon)
+"""
+import torch
+import numpy as np
 
 try :
-    import pulp 
+    import pulp
 except Exception as e :
     raise RuntimeError ("PuLP is required for MILPAgent. Please install 'pulp'.")from e 
 
@@ -35,7 +42,6 @@ def _quantize_soc_kwh (soc_kwh :float ,step_kwh :float )->float :
 
 
 class MILPAgent :
-    "Documentation."
 
     def __init__ (self ,max_evs_per_station :int =MAX_EV_PER_STATION ,horizon :int =MILP_HORIZON ):
         self .max_evs =max_evs_per_station 
@@ -50,7 +56,6 @@ class MILPAgent :
         self .w_switch =float (MILP_W_SWITCH )
 
     def set_weights (self ,w_ag =None ,w_soc =None ,w_switch =None ):
-        "Documentation."
         if w_ag is not None :self .w_ag =float (w_ag )
         if w_soc is not None :self .w_soc =float (w_soc )
         if w_switch is not None :self .w_switch =float (w_switch )

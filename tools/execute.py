@@ -1,33 +1,83 @@
+"""
+Runtime execution script for saved EV charging policies.
 
-import argparse 
-import csv 
-import glob 
-import json 
-import os 
-import re 
-import subprocess 
-import sys 
-import time 
-from datetime import datetime 
-from pathlib import Path 
+This module evaluates a trained checkpoint on one or more external day-level
+demand-adjustment CSV files. It is separate from the training-time evaluator:
+`tools.evaluator.test()` measures checkpoint performance on the held-out demand
+split during training, while this script is intended for post-training runtime
+analysis over explicit calendar-day demand inputs.
 
-import matplotlib .pyplot as plt 
-import numpy as np 
-import pandas as pd 
-import torch 
+Main workflow:
+1. Optionally split a monthly workbook into `day_YYYY-MM-DD.csv` files.
+2. Load a saved actor checkpoint from an archive/model directory.
+3. Roll out the deterministic policy on each selected day and repeat.
+4. Optionally apply an inference-only force-charging override for EVs that can
+   no longer satisfy their requested energy under a conservative remaining-time
+   check.
+5. Save per-step traces, per-run summaries, day-level summaries, aggregate
+   metrics, and diagnostic plots.
+
+Inputs:
+- A model archive directory containing `actor_*_ep*.pth` or shared-actor files.
+- Day CSV files with a `demand_adjustment` column, or a numeric fallback column.
+- EV arrivals, EV profiles, action limits, and episode length come from the same
+  EVEnv/Config setup used by training.
+
+Outputs:
+- `episode_results.csv`: one row per evaluated day/repeat rollout.
+- `summary_by_day.csv`: day-level weighted SoC/dispatch/force summaries.
+- `summary_overall.csv`: aggregate weighted metrics across all runs.
+- `runs/run_*/step_trace.csv`: per-step demand, power, reward, arrival, and
+  force-override diagnostics.
+- PNG plots for station cooperation, power mismatch, reward decomposition,
+  arrivals, force timeline, and aggregate summaries.
+"""
+
+import argparse
+import csv
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import warnings
+from datetime import datetime
+from pathlib import Path
+
+PROJECT_ROOT =os .path .abspath (os .path .join (os .path .dirname (__file__ ),os .pardir ))
+if PROJECT_ROOT not in sys .path :
+    sys .path .insert (0 ,PROJECT_ROOT )
+
+# Set this to a model archive folder to make execute.py use it by default.
+# Leave empty to auto-detect the latest archive/model_* folder.
+TARGET_ARCHIVE_DIR =""
+
+os .environ .setdefault ("TF_CPP_MIN_LOG_LEVEL","2")
+warnings .filterwarnings (
+"ignore",
+message =r".*You are using `torch\.load` with `weights_only=False`.*",
+category =FutureWarning ,
+)
+
+import matplotlib .pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
 
 from training.Agent import MADDPG
 from training.benchmark_agents.independent_ddpg import IndependentDDPG
 from training.benchmark_agents.shared_obs_ddpg import SharedObsDDPG
-from training.benchmark_agents.shared_obs_sac import SharedObsSAC 
-from Config import USE_INDEPENDENT_DDPG as CFG_USE_IDDPG 
-from Config import USE_SHARED_OBS_DDPG as CFG_USE_SHARED_OBS_DDPG 
-from Config import USE_SHARED_OBS_SAC as CFG_USE_SHARED_OBS_SAC 
-from Config import NUM_STATIONS ,NUM_EVS ,EPISODE_STEPS 
-from Config import LR_ACTOR ,LR_CRITIC_LOCAL ,LR_GLOBAL_CRITIC 
-from Config import BATCH_SIZE ,GAMMA ,TAU ,TAU_GLOBAL 
-from Config import TD3_SIGMA_GLOBAL ,TD3_CLIP_GLOBAL ,TD3_SIGMA_LOCAL ,TD3_CLIP_LOCAL 
-from Config import MAX_EV_POWER_KW ,POWER_TO_ENERGY ,ENV_SEED 
+from training.benchmark_agents.shared_obs_sac import SharedObsSAC
+from Config import USE_INDEPENDENT_DDPG as CFG_USE_IDDPG
+from Config import USE_SHARED_OBS_DDPG as CFG_USE_SHARED_OBS_DDPG
+from Config import USE_SHARED_OBS_SAC as CFG_USE_SHARED_OBS_SAC
+from Config import NUM_STATIONS ,NUM_EVS ,EPISODE_STEPS
+from Config import LR_ACTOR ,LR_CRITIC_LOCAL ,LR_GLOBAL_CRITIC
+from Config import BATCH_SIZE ,GAMMA ,TAU ,TAU_GLOBAL
+from Config import TD3_SIGMA_GLOBAL ,TD3_CLIP_GLOBAL
+from Config import MAX_EV_POWER_KW ,POWER_TO_ENERGY ,ENV_SEED
 from Config import (
 SHARED_OBS_LR_ACTOR ,
 SHARED_OBS_LR_CRITIC_LOCAL ,
@@ -39,8 +89,8 @@ SAC_LR_ACTOR ,SAC_LR_CRITIC ,SAC_LR_ALPHA ,
 SAC_TAU ,SAC_ALPHA_INIT ,SAC_TARGET_ENTROPY_SCALE ,
 SAC_GLOBAL_REWARD_WEIGHT ,
 )
-from environment.EVEnv import EVEnv 
-from tools.evaluator import set_env_seed 
+from environment.EVEnv import EVEnv
+from tools.evaluator import set_env_seed
 from tools.Utils import (
 plot_arrival_counts ,
 plot_daily_rewards ,
@@ -49,10 +99,10 @@ plot_power_mismatch_analysis ,
 plot_reward_breakdown ,
 plot_station_cooperation_full ,
 )
-from environment.normalize import normalize_observation 
+from environment.normalize import normalize_observation
 
-DEMAND_TARGET_MIN =-200.0 
-DEMAND_TARGET_MAX =800.0 
+DEMAND_TARGET_MIN =-200.0
+DEMAND_TARGET_MAX =800.0
 ACTOR_PATTERNS =(
 re .compile (r"actor_\d+_ep(\d+)\.pth$"),
 re .compile (r"shared_actor_ep(\d+)\.pth$"),
@@ -64,12 +114,12 @@ def extract_actor_episode (filename ):
         match =pattern .fullmatch (filename )
         if match is not None :
             return int (match .group (1 ))
-    return None 
+    return None
 
 
 def resolve_path (project_root ,path_value ):
     if os .path .isabs (path_value ):
-        return path_value 
+        return path_value
     return os .path .abspath (os .path .join (project_root ,path_value ))
 
 
@@ -82,7 +132,7 @@ def extract_day_label (csv_path ):
     base =os .path .basename (csv_path )
     m =re .search (r"day_(\d{4}-\d{2}-\d{2})\.csv$",base )
     if m is None :
-        return base 
+        return base
     return m .group (1 )
 
 
@@ -90,13 +140,20 @@ def infer_year_month_from_xlsx (xlsx_path ):
     base =os .path .basename (xlsx_path )
     m =re .search (r"(\d{2})\s+(\d{4})\.xlsx$",base )
     if m is None :
-        return None 
+        return None
     month =m .group (1 )
     year =m .group (2 )
     return f"{year}-{month}"
 
 
 def load_scaled_episode (csv_path ):
+    """
+    Load one day CSV and rescale its demand series to the runtime target range.
+
+    The source day files may have different raw magnitudes. This maps the day's
+    minimum/maximum linearly onto `[DEMAND_TARGET_MIN, DEMAND_TARGET_MAX]` while
+    preserving intra-day shape.
+    """
     df =pd .read_csv (csv_path )
     if "demand_adjustment"in df .columns :
         series =pd .to_numeric (df ["demand_adjustment"],errors ="coerce").fillna (0.0 ).to_numpy (float )
@@ -110,18 +167,24 @@ def load_scaled_episode (csv_path ):
         series =np .zeros (EPISODE_STEPS ,dtype =float )
     data =np .zeros (EPISODE_STEPS ,dtype =float )
     usable =series [:EPISODE_STEPS ].astype (float )
-    data [:usable .size ]=usable 
+    data [:usable .size ]=usable
     a =float (np .min (data ))
     b =float (np .max (data ))
     if np .isclose (a ,b ):
         return np .full_like (data ,(DEMAND_TARGET_MIN +DEMAND_TARGET_MAX )/2.0 )
     scale =(DEMAND_TARGET_MAX -DEMAND_TARGET_MIN )/(b -a )
-    offset =DEMAND_TARGET_MIN /scale -a 
+    offset =DEMAND_TARGET_MIN /scale -a
     return scale *(data +offset )
 
 
 
 def find_model_path_and_episode (base_dir ,requested_episode =None ):
+    """
+    Locate the folder containing actor weights for the requested checkpoint.
+
+    `base_dir` may be the model root or a directory with nested `results/TEST*`
+    folders. If no episode is requested, the latest/highest candidate is used.
+    """
     search_dirs =[base_dir ]
     results_dir =os .path .join (base_dir ,"results")
     if os .path .isdir (results_dir ):
@@ -132,13 +195,13 @@ def find_model_path_and_episode (base_dir ,requested_episode =None ):
     candidates =[]
     for directory in search_dirs :
         if not os .path .isdir (directory ):
-            continue 
+            continue
         for name in os .listdir (directory ):
             ep =extract_actor_episode (name )
             if ep is None :
-                continue 
+                continue
             if requested_episode is not None and ep !=int (requested_episode ):
-                continue 
+                continue
             actor_path =os .path .join (directory ,name )
             mtime =os .path .getmtime (actor_path )
             candidates .append ((ep ,mtime ,directory ))
@@ -156,6 +219,13 @@ def find_model_path_and_episode (base_dir ,requested_episode =None ):
 
 
 def build_agent (env ):
+    """
+    Construct the policy class that matches the current Config agent flags.
+
+    The network dimensions are inferred from a bootstrap EVEnv observation so
+    saved actor weights can be loaded into the same architecture used in
+    training.
+    """
     state_dim =env ._get_obs ().shape [1 ]
     if CFG_USE_IDDPG :
         return IndependentDDPG (
@@ -215,8 +285,6 @@ def build_agent (env ):
     tau_global =TAU_GLOBAL ,
     td3_sigma =TD3_SIGMA_GLOBAL ,
     td3_clip =TD3_CLIP_GLOBAL ,
-    td3_sigma_local =TD3_SIGMA_LOCAL ,
-    td3_clip_local =TD3_CLIP_LOCAL ,
     smoothl1_beta =0.01 ,
     )
 
@@ -228,74 +296,83 @@ def ensure_tensor_actions (actions ,env ):
 
 
 def apply_force_charging (actions ,env ,trigger_ratio ,slack_kwh ,ev_force_state =None ):
-    "Documentation."
+    """
+    Apply an inference-only full-charge override for time-critical EVs.
+
+    For each active EV, compare remaining required energy with the maximum
+    charge energy still reachable before departure. Once an EV crosses the
+    trigger threshold, its action is forced to `+1.0` until the need disappears.
+    `ev_force_state` keeps this decision sticky for the same station/slot/depart
+    tuple, avoiding rapid on/off toggling across adjacent steps.
+    """
     if ev_force_state is None :
         ev_force_state ={}
     actions =ensure_tensor_actions (actions ,env )
-    forced =0 
-    forced_by_station =[0 ]*env .num_stations 
+    forced =0
+    forced_by_station =[0 ]*env .num_stations
     for st in range (env .num_stations ):
         active_evs =torch .nonzero (env .ev_mask [st ],as_tuple =False ).squeeze (-1 )
         if active_evs .numel ()==0 :
-            continue 
+            continue
         sorted_active =env ._sort_active_evs (st ,active_evs )
         for order_idx in range (len (sorted_active )):
             ev_idx =int (sorted_active [order_idx ].item ())
             need_kwh =float ((env .target [st ,ev_idx ]-env .soc [st ,ev_idx ]).item ())
-            
+
             ev_key =(st ,ev_idx ,int (env .depart [st ,ev_idx ].item ()))
 
-            
+
             if need_kwh <=0 :
                 ev_force_state .pop (ev_key ,None )
-                continue 
+                continue
 
-            remaining_steps =int (env .depart [st ,ev_idx ].item ())-int (env .step_count )+1 
+            remaining_steps =int (env .depart [st ,ev_idx ].item ())-int (env .step_count )+1
             remaining_steps =max (remaining_steps ,1 )
-            max_possible_kwh =remaining_steps *MAX_EV_POWER_KW *POWER_TO_ENERGY 
+            max_possible_kwh =remaining_steps *MAX_EV_POWER_KW *POWER_TO_ENERGY
 
-            
+
             if ev_key not in ev_force_state :
-                safe_possible_kwh =max_possible_kwh *trigger_ratio +slack_kwh 
+                safe_possible_kwh =max_possible_kwh *trigger_ratio +slack_kwh
                 if need_kwh <safe_possible_kwh :
-                    continue 
-                ev_force_state [ev_key ]=True 
+                    continue
+                ev_force_state [ev_key ]=True
 
-                
+
             current_action =float (actions [st ,order_idx ].item ())
             if current_action >=1.0 -1e-6 :
-                continue 
-            actions [st ,order_idx ]=1.0 
-            forced +=1 
-            forced_by_station [st ]+=1 
-    return actions ,forced ,forced_by_station 
+                continue
+            actions [st ,order_idx ]=1.0
+            forced +=1
+            forced_by_station [st ]+=1
+    return actions ,forced ,forced_by_station
 
 
 def normalize_int_list (values ,size ):
-    out =[0 ]*size 
+    out =[0 ]*size
     if isinstance (values ,dict ):
         for idx in range (size ):
             out [idx ]=int (values .get (idx ,values .get (str (idx ),0 )))
-        return out 
+        return out
     if isinstance (values ,(list ,tuple ,np .ndarray )):
         for idx in range (min (size ,len (values ))):
             out [idx ]=int (values [idx ])
-    return out 
+    return out
 
 
 def normalize_float_list (values ,size ):
-    out =[0.0 ]*size 
+    out =[0.0 ]*size
     if isinstance (values ,dict ):
         for idx in range (size ):
             out [idx ]=float (values .get (idx ,values .get (str (idx ),0.0 )))
-        return out 
+        return out
     if isinstance (values ,(list ,tuple ,np .ndarray )):
         for idx in range (min (size ,len (values ))):
             out [idx ]=float (values [idx ])
-    return out 
+    return out
 
 
 def build_episode_data ():
+    """Create the per-step trace structure consumed by the plotting utilities."""
     episode_data ={
     "ag_requests":[],
     "total_ev_transport":[],
@@ -310,10 +387,16 @@ def build_episode_data ():
     }
     for station_idx in range (NUM_STATIONS ):
         episode_data [f"actual_ev{station_idx + 1}"]=[]
-    return episode_data 
+    return episode_data
 
 
 def build_step_row (step_count ,info ,forced_now ,forced_by_station ,local_reward_mean ):
+    """
+    Flatten EVEnv's nested `info` payload into one CSV-friendly step row.
+
+    The row keeps both policy/environment outcomes (demand tracking, rewards,
+    arrivals, active EVs) and intervention diagnostics from force charging.
+    """
     station_powers =normalize_float_list (info .get ("station_powers",[]),NUM_STATIONS )
     arrivals_by_station =normalize_int_list (info .get ("arrivals_by_station",[]),NUM_STATIONS )
     active_by_station =normalize_int_list (info .get ("active_evs",{}),NUM_STATIONS )
@@ -321,10 +404,10 @@ def build_step_row (step_count ,info ,forced_now ,forced_by_station ,local_rewar
     station_breakdown =reward_breakdown .get ("per_station",[])
     global_breakdown =reward_breakdown .get ("global",{})
 
-    local_shaping_total =0.0 
-    local_departure_total =0.0 
-    local_discharge_penalty_total =0.0 
-    local_switch_penalty_total =0.0 
+    local_shaping_total =0.0
+    local_departure_total =0.0
+    local_discharge_penalty_total =0.0
+    local_switch_penalty_total =0.0
     for item in station_breakdown :
         local_shaping_total +=float (item .get ("progress_shaping",0.0 ))
         local_departure_total +=float (item .get ("departure_reward",0.0 ))
@@ -333,12 +416,12 @@ def build_step_row (step_count ,info ,forced_now ,forced_by_station ,local_rewar
 
     net_demand =float (info .get ("net_demand",0.0 ))
     total_ev_transport =float (info .get ("total_ev_transport",0.0 ))
-    power_mismatch =net_demand -total_ev_transport 
+    power_mismatch =net_demand -total_ev_transport
 
     active_evs_total =int (sum (active_by_station ))
-    force_ev_step_ratio_pct =0.0 
+    force_ev_step_ratio_pct =0.0
     if active_evs_total !=0 :
-        force_ev_step_ratio_pct =float (forced_now )/float (active_evs_total )*100.0 
+        force_ev_step_ratio_pct =float (forced_now )/float (active_evs_total )*100.0
 
     row ={
     "step":int (step_count ),
@@ -361,25 +444,31 @@ def build_step_row (step_count ,info ,forced_now ,forced_by_station ,local_rewar
     }
 
     for station_idx in range (NUM_STATIONS ):
-        station_num =station_idx +1 
+        station_num =station_idx +1
         row [f"station_{station_num}_power_kw"]=float (station_powers [station_idx ])
         row [f"station_{station_num}_arrivals"]=int (arrivals_by_station [station_idx ])
         row [f"station_{station_num}_active_evs"]=int (active_by_station [station_idx ])
         row [f"station_{station_num}_force_ev_step_overrides"]=int (forced_by_station [station_idx ])
 
-    return row 
+    return row
 
 
 def run_single_episode (agent ,day_label ,demand_series ,force_enabled ,trigger_ratio ,slack_kwh ):
+    """
+    Roll out one deterministic policy episode for a single demand day.
+
+    Exploration noise is disabled. The same agent object is reused across days,
+    but `episode_start()`/`episode_end()` reset its episodic bookkeeping.
+    """
     env =EVEnv (num_stations =NUM_STATIONS ,num_evs =NUM_EVS ,episode_steps =EPISODE_STEPS )
     env .reset (net_demand_series =demand_series )
     agent .episode_start ()
     agent .update_active_evs (env )
 
-    ep_local =0.0 
-    ep_global =0.0 
-    forced_overrides =0 
-    forced_steps =0 
+    ep_local =0.0
+    ep_global =0.0
+    forced_overrides =0
+    forced_steps =0
     step_rows =[]
     episode_data =build_episode_data ()
     ev_force_state ={}
@@ -389,8 +478,8 @@ def run_single_episode (agent ,day_label ,demand_series ,force_enabled ,trigger_
         agent .update_active_evs (env )
         obs =normalize_observation (obs )
         actions =agent .act (obs ,env =env ,noise =False )
-        forced_now =0 
-        forced_by_station =[0 ]*NUM_STATIONS 
+        forced_now =0
+        forced_by_station =[0 ]*NUM_STATIONS
         if force_enabled :
             actions ,forced_now ,forced_by_station =apply_force_charging (
             actions ,
@@ -401,10 +490,10 @@ def run_single_episode (agent ,day_label ,demand_series ,force_enabled ,trigger_
             )
             forced_overrides +=int (forced_now )
             if int (forced_now )!=0 :
-                forced_steps +=1 
+                forced_steps +=1
         _ ,r_local ,r_global ,done ,info =env .apply_action (actions )
         local_reward_mean =float (np .mean (r_local ))
-        ep_local +=local_reward_mean 
+        ep_local +=local_reward_mean
         ep_global +=float (r_global )
 
         step_count =int (info .get ("step_count",env .step_count ))
@@ -433,7 +522,7 @@ def run_single_episode (agent ,day_label ,demand_series ,force_enabled ,trigger_
             )
 
         if all (done ):
-            break 
+            break
 
     agent .episode_end ()
     metrics =env .get_metrics ()
@@ -445,19 +534,19 @@ def run_single_episode (agent ,day_label ,demand_series ,force_enabled ,trigger_
     shortage_steps =int (metrics .get ("shortage_steps",0 ))
     surplus_within =int (metrics .get ("surplus_within_narrow",0 ))
     shortage_within =int (metrics .get ("shortage_within_narrow",0 ))
-    dispatch_success =surplus_within +shortage_within 
-    dispatch_total =surplus_steps +shortage_steps 
-    dispatch_tracking =0.0 
+    dispatch_success =surplus_within +shortage_within
+    dispatch_total =surplus_steps +shortage_steps
+    dispatch_tracking =0.0
     if dispatch_total !=0 :
-        dispatch_tracking =dispatch_success /dispatch_total *100.0 
+        dispatch_tracking =dispatch_success /dispatch_total *100.0
 
     step_df =pd .DataFrame (step_rows )
-    controllable_ev_steps =0 
+    controllable_ev_steps =0
     if not step_df .empty and "active_evs_total"in step_df .columns :
         controllable_ev_steps =int (step_df ["active_evs_total"].sum ())
-    forced_ev_step_ratio_pct =0.0 
+    forced_ev_step_ratio_pct =0.0
     if controllable_ev_steps !=0 :
-        forced_ev_step_ratio_pct =float (forced_overrides )/float (controllable_ev_steps )*100.0 
+        forced_ev_step_ratio_pct =float (forced_overrides )/float (controllable_ev_steps )*100.0
 
     row ={
     "day":day_label ,
@@ -486,28 +575,36 @@ def run_single_episode (agent ,day_label ,demand_series ,force_enabled ,trigger_
     "forced_steps":int (forced_steps ),
     "episode_steps":step_count ,
     }
-    return row ,step_df ,episode_data 
+    return row ,step_df ,episode_data
 
 
 
 def build_overall_summary (df ,repeats ,day_count ):
+    """
+    Aggregate episode rows into weighted experiment-level metrics.
+
+    SoC hit is weighted by departing EV count, dispatch tracking is weighted by
+    dispatch-relevant steps, and force ratio is weighted by controllable EV-step
+    count. These weighted rates avoid giving small/easy days the same influence
+    as large/high-traffic days.
+    """
     depart_total =int (df ["departing_evs"].sum ())
     soc_met_total =int (df ["departing_evs_soc_met"].sum ())
     dispatch_success_total =int (df ["dispatch_success_steps"].sum ())
     dispatch_steps_total =int (df ["dispatch_total_steps"].sum ())
     controllable_ev_steps_total =int (df ["controllable_ev_steps"].sum ())
 
-    soc_hit_weighted =0.0 
+    soc_hit_weighted =0.0
     if depart_total !=0 :
-        soc_hit_weighted =soc_met_total /depart_total *100.0 
+        soc_hit_weighted =soc_met_total /depart_total *100.0
 
-    dispatch_weighted =0.0 
+    dispatch_weighted =0.0
     if dispatch_steps_total !=0 :
-        dispatch_weighted =dispatch_success_total /dispatch_steps_total *100.0 
+        dispatch_weighted =dispatch_success_total /dispatch_steps_total *100.0
 
-    forced_ev_step_ratio_pct =0.0 
+    forced_ev_step_ratio_pct =0.0
     if controllable_ev_steps_total !=0 :
-        forced_ev_step_ratio_pct =float (df ["forced_ev_step_overrides"].sum ())/float (controllable_ev_steps_total )*100.0 
+        forced_ev_step_ratio_pct =float (df ["forced_ev_step_overrides"].sum ())/float (controllable_ev_steps_total )*100.0
 
     summary ={
     "episodes":int (len (df )),
@@ -530,7 +627,7 @@ def build_overall_summary (df ,repeats ,day_count ):
     "forced_overrides":int (df ["forced_overrides"].sum ()),
     "forced_steps":int (df ["forced_steps"].sum ()),
     }
-    return summary 
+    return summary
 
 
 _MODEL_DIR_PATTERN =re .compile (r"model_\d{8}_\d{6}$")
@@ -540,17 +637,17 @@ _TEST_DIR_PATTERN =re .compile (r"TEST(\d+)$")
 def find_latest_model_dir (archive_dir ):
     """Find the latest model_YYYYMMDD_HHMMSS directory by name (alphabetically = newest timestamp)."""
     archive_dir =Path (archive_dir )
-    latest =None 
+    latest =None
     for candidate in archive_dir .iterdir ():
         if not candidate .is_dir ()or not _MODEL_DIR_PATTERN .fullmatch (candidate .name ):
-            continue 
+            continue
         if not (candidate /"results").is_dir ():
-            continue 
+            continue
         if latest is None or candidate .name >latest .name :
-            latest =candidate 
+            latest =candidate
     if latest is None :
         raise FileNotFoundError (f"No archive/model_* directories with results found under: {archive_dir}")
-    return latest 
+    return latest
 
 
 def build_test_dir_map (results_dir ):
@@ -559,37 +656,38 @@ def build_test_dir_map (results_dir ):
     test_dirs ={}
     for entry in results_dir .iterdir ():
         if not entry .is_dir ():
-            continue 
+            continue
         m =_TEST_DIR_PATTERN .fullmatch (entry .name )
         if m :
-            test_dirs [int (m .group (1 ))]=entry 
-    return test_dirs 
+            test_dirs [int (m .group (1 ))]=entry
+    return test_dirs
 
 
 def load_test_history_episodes (results_dir ):
     """Read test_history.json, return list of episode ints (or None if unavailable)."""
     history_path =Path (results_dir )/"test_history.json"
     if not history_path .is_file ():
-        return None 
+        return None
     with history_path .open ("r",encoding ="utf-8")as fh :
         data =json .load (fh )
     episodes =data .get ("episodes")
     if not isinstance (episodes ,list ):
-        return None 
+        return None
     parsed =[]
     for value in episodes :
         try :
             parsed .append (int (value ))
         except (TypeError ,ValueError ):
-            return None 
-    return parsed 
+            return None
+    return parsed
 
 
 def choose_best_episode (model_dir ):
-    """Find best episode by SoC+Dispatch score from test_performance_metrics.csv.
+    """Find the checkpoint with the best validation SoC+dispatch score.
 
-    Returns the episode int for the best-scoring TEST* dir, or the highest
-    episode number as a fallback.
+    `test_performance_metrics.csv` stores one row per training-time evaluation.
+    The chosen score is `SoC_Hit_Rate_% + Dispatch_Tracking_Rate_%`, constrained
+    to episodes that have a corresponding `results/TEST*` actor snapshot.
     """
     results_dir =Path (model_dir )/"results"
     test_dirs =build_test_dir_map (results_dir )
@@ -599,7 +697,7 @@ def choose_best_episode (model_dir ):
     metrics_csv =results_dir /"test_performance_metrics.csv"
     history_episodes =load_test_history_episodes (results_dir )
 
-    best_choice =None 
+    best_choice =None
     if metrics_csv .is_file ():
         with metrics_csv .open ("r",encoding ="utf-8-sig",newline ="")as fh :
             rows =list (csv .DictReader (fh ))
@@ -609,9 +707,9 @@ def choose_best_episode (model_dir ):
                 soc =float (row ["SoC_Hit_Rate_%"])
                 dispatch =float (row ["Dispatch_Tracking_Rate_%"])
             except (KeyError ,TypeError ,ValueError ):
-                continue 
+                continue
 
-            episode =None 
+            episode =None
             if history_episodes is not None and idx <len (history_episodes ):
                 episode =history_episodes [idx ]
             else :
@@ -619,20 +717,20 @@ def choose_best_episode (model_dir ):
                 try :
                     csv_episode =int (float (raw_episode ))
                 except (TypeError ,ValueError ):
-                    csv_episode =None 
+                    csv_episode =None
 
                 if csv_episode is not None :
                     if csv_episode in test_dirs :
-                        episode =csv_episode 
+                        episode =csv_episode
                     elif (csv_episode *10 )in test_dirs :
-                        episode =csv_episode *10 
+                        episode =csv_episode *10
 
             if episode is None or episode not in test_dirs :
-                continue 
+                continue
 
-            score =soc +dispatch 
+            score =soc +dispatch
             if (
-            best_choice is None 
+            best_choice is None
             or score >best_choice [1 ]
             or (score ==best_choice [1 ]and episode >best_choice [0 ])
             ):
@@ -650,7 +748,7 @@ def pick_default_model_dir (project_root ):
     try :
         return str (find_latest_model_dir (archive_dir ))
     except FileNotFoundError :
-        return archive_dir 
+        return archive_dir
 
 
 def sanitize_label (value ):
@@ -677,7 +775,7 @@ def build_plot_metrics_from_df (df ):
 
 def save_force_timeline_plot (step_df ,run_dir ,episode_index ):
     if step_df .empty :
-        return 
+        return
 
     x =step_df ["step"].to_numpy ()
     force_counts =step_df ["force_ev_step_overrides"].to_numpy ()
@@ -707,7 +805,7 @@ def save_force_timeline_plot (step_df ,run_dir ,episode_index ):
 
 def save_day_summary_plot (day_summary ,output_dir ):
     if day_summary .empty :
-        return 
+        return
 
     x =np .arange (len (day_summary ))
     labels =day_summary ["day"].astype (str ).tolist ()
@@ -767,7 +865,7 @@ def save_day_summary_plot (day_summary ,output_dir ):
 
 def save_force_overview_plot (df ,output_dir ):
     if df .empty :
-        return 
+        return
 
     x =np .arange (len (df ))
     labels =[f"{day}\nR{int(repeat):02d}"for day ,repeat in zip (df ["day"],df ["repeat"])]
@@ -797,6 +895,13 @@ def save_force_overview_plot (df ,output_dir ):
 
 
 def save_episode_artifacts (run_dir ,row ,step_df ,episode_data ):
+    """
+    Save per-run diagnostics for one rollout.
+
+    The same `episode_data` schema is used by training/test plots, so runtime
+    execution artifacts remain visually comparable with checkpoint evaluation
+    artifacts.
+    """
     os .makedirs (run_dir ,exist_ok =True )
     step_df .to_csv (os .path .join (run_dir ,"step_trace.csv"),index =False )
 
@@ -822,8 +927,9 @@ def save_episode_artifacts (run_dir ,row ,step_df ,episode_data ):
 
 
 def save_summary_artifacts (output_dir ,episode_df ,day_summary_df ):
+    """Save aggregate plots across all evaluated day/repeat rollouts."""
     if episode_df .empty :
-        return 
+        return
 
     metrics =build_plot_metrics_from_df (episode_df )
     try :
@@ -852,7 +958,9 @@ def save_summary_artifacts (output_dir ,episode_df ,day_summary_df ):
 
 
 def parse_args (project_root ):
-    default_model_dir =pick_default_model_dir (project_root )
+    """Define the command-line interface for runtime execution experiments."""
+    configured_model_dir =str (TARGET_ARCHIVE_DIR ).strip ()
+    default_model_dir =configured_model_dir if configured_model_dir else pick_default_model_dir (project_root )
     parser =argparse .ArgumentParser (
     description ="Runtime evaluation with optional force charging override (inference only)."
     )
@@ -909,10 +1017,19 @@ def parse_args (project_root ):
 
 
 def main ():
-    project_root =os .path .abspath (os .path .dirname (__file__ ))
+    """
+    CLI entry point.
+
+    The function prepares demand inputs, loads the selected checkpoint, executes
+    all requested day/repeat rollouts, and writes tabular/graphical artifacts to
+    the output directory.
+    """
+    project_root =PROJECT_ROOT
     args =parse_args (project_root )
 
     model_dir =resolve_path (project_root ,args .model_dir )
+    if str (TARGET_ARCHIVE_DIR ).strip ()and not os .path .isabs (str (TARGET_ARCHIVE_DIR ).strip ()):
+        raise ValueError ("TARGET_ARCHIVE_DIR must be an absolute path when set.")
     xlsx_path =resolve_path (project_root ,args .xlsx )
     split_script =resolve_path (project_root ,args .split_script )
     split_out_dir =resolve_path (project_root ,args .split_out_dir )
@@ -951,7 +1068,7 @@ def main ():
     bootstrap_env .reset (net_demand_series =day_payloads [0 ][1 ])
     agent =build_agent (bootstrap_env )
 
-    requested_episode =args .episode 
+    requested_episode =args .episode
     if requested_episode is None :
         requested_episode =choose_best_episode (model_dir )
         print (f"[execute] auto-detected best episode: {requested_episode}")
@@ -965,7 +1082,7 @@ def main ():
 
     rows =[]
     total_runs =int (args .repeats )*len (day_payloads )
-    run_idx =0 
+    run_idx =0
     started =time .time ()
 
     force_enabled =not bool (args .disable_force )
@@ -977,8 +1094,8 @@ def main ():
 
     for repeat in range (1 ,int (args .repeats )+1 ):
         for day_idx ,payload in enumerate (day_payloads ,start =1 ):
-            run_idx +=1 
-            day_label ,demand_series ,source_csv =payload 
+            run_idx +=1
+            day_label ,demand_series ,source_csv =payload
             t0 =time .time ()
             row ,step_df ,episode_data =run_single_episode (
             agent ,
@@ -988,11 +1105,11 @@ def main ():
             trigger_ratio =force_ratio ,
             slack_kwh =force_slack ,
             )
-            row ["episode_index"]=run_idx 
-            row ["repeat"]=repeat 
-            row ["day_index"]=day_idx 
-            row ["source_csv"]=source_csv 
-            row ["elapsed_sec"]=time .time ()-t0 
+            row ["episode_index"]=run_idx
+            row ["repeat"]=repeat
+            row ["day_index"]=day_idx
+            row ["source_csv"]=source_csv
+            row ["elapsed_sec"]=time .time ()-t0
             rows .append (row )
 
             run_dir_name =f"run_{run_idx:03d}_{sanitize_label(day_label)}_rep{repeat:02d}"
@@ -1016,7 +1133,7 @@ def main ():
             )
 
     agent .set_test_mode (False )
-    total_elapsed =time .time ()-started 
+    total_elapsed =time .time ()-started
 
     df =pd .DataFrame (rows )
 
@@ -1059,7 +1176,7 @@ def main ():
     day_summary .to_csv (day_summary_csv ,index =False )
 
     overall =build_overall_summary (df ,repeats =int (args .repeats ),day_count =len (day_payloads ))
-    overall ["model_path"]=model_path 
+    overall ["model_path"]=model_path
     overall ["model_episode"]=int (model_episode )
     overall ["total_elapsed_sec"]=float (total_elapsed )
     pd .DataFrame ([overall ]).to_csv (overall_csv ,index =False )

@@ -1,86 +1,85 @@
-# Hierarchical Multi-Agent Reinforcement Learning Control for EV-VPP in Balancing Markets
-This repository contains the official implementation of the paper:
+# Hierarchical MARL control
 
-> **Hierarchical-Multi-Agent-Reinforcement-Learning-Control-for-EV-VPP-in-Balancing-Markets**  
-> *Author: Koshin Hayashi, Sihui Xue, Daisuke Kodaira*  
-> *Submitted to IEEE Access*
+Hierarchical MARL control is a multi-agent reinforcement learning project for EV charging control.
+It jointly learns local charging decisions at each station and global demand-tracking behavior, with the goal of sending EVs out at their target SoC while following a grid-side adjustment signal as closely as possible.
 
-## 📝 Abstract
+## Overview
 
-The project studies coordinated EV fleet control to satisfy both local EV charging goals (e.g., target SoC before departure) and global balancing requests from the power system. It includes a custom EV environment, hierarchical/benchmark agents, and training/evaluation utilities. The framework supports MADDPG-style learning with local and global critics, and benchmark comparisons such as MILP and independent/shared-observation baselines.
+- **Environment**: A multi-station EV charging simulation with a variable number of EV slots per station
+  - Simulates EV arrivals, dwell time, departure, SoC updates, per-station constraints, and AG tracking
+- **Training agent**: MADDPG-style training with local critics, a global TD3-style critic, and a mixer
+- **Benchmarks**: Independent DDPG / Shared-Observation DDPG / Shared-Observation SAC / MILP (PuLP + CBC)
 
-## 📂 Repository Structure
+## Directory layout
 
 ```text
-.
-├── Main.py                     # Entry point
-├── Config.py                   # Centralized hyperparameters and experiment flags
-├── requirements.txt            # Python dependencies
-├── environment/                # EV-VPP simulation environment and preprocessing
-│   ├── EVEnv.py
-│   ├── ev_info_loader.py
-│   ├── observation_config.py
-│   ├── normalize.py
-│   └── readcsv.py
-├── training/                   # Training loop and agent implementations
-│   ├── train.py
-│   ├── Agent/                  # MADDPG components (actor, critic, replay, noise)
-│   └── benchmark_agents/       # MILP, Independent DDPG, Shared-Obs DDPG/SAC
-├── tools/                      # Logging, evaluation, execution, visualization helpers
-└── data/                       # Input EV profiles and balancing-demand data
+Config.py                       Central location for project-wide hyperparameters
+Main.py                         Main training entry point
+environment/
+  EVEnv.py                      EV charging environment (reset/step)
+  ev_info_loader.py             EV profile and arrival-SoC loaders
+  normalize.py                  Observation normalization helpers
+  observation_config.py         Observation feature flags and dimensions
+  readcsv.py                    AG-demand CSV loader
+training/
+  train.py                      Main training loop
+  Agent/
+    maddpg.py                   MADDPG agent with local/global critics
+    actor.py                    DeepSets-based local actor
+    critic.py                   Local/global critics with attention-based components
+    mlp.py                      MLP-based critic and mixer components
+    noise.py                    Gaussian/OU noise and epsilon-greedy helpers
+    replay_buffer.py            GPU-friendly replay buffer
+  benchmark_agents/
+    independent_ddpg.py         Independent DDPG baseline
+    shared_obs_ddpg.py          Shared-observation DDPG baseline
+    shared_obs_sac.py           Shared-observation SAC baseline
+    milp_agent.py               MILP baseline controller
+tools/
+  Utils.py                      Plotting and utility helpers
+  evaluator.py                  Evaluation helpers for test_history.json and metrics
+  execute.py                    Execute/evaluate saved models
+  runtensorboard.py             Launch TensorBoard
+data/                           Input data (CSV, EV profiles, etc.)
+archive/                        Saved models and output artifacts
 ```
 
-## 💻 Installation
+## Setup
 
-### 1. Prerequisites
-
-- Python 3.10+
-- (Optional) CUDA-enabled GPU for faster training
-
-### 2. Setup
+Python 3.10 is recommended.
 
 ```bash
-git clone https://github.com/SmartGridLab/Hierarchical-Multi-Agent-Reinforcement-Learning-Control-for-EV-VPP-in-Balancing-Markets.git
-cd Hierarchical-Multi-Agent-Reinforcement-Learning-Control-for-EV-VPP-in-Balancing-Markets
-
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-
 pip install -r requirements.txt
 ```
 
-## 🚀 Usage
+If you use a GPU, install a CUDA-compatible PyTorch build first.
+You can also switch the device manually in `Config.py` by setting `Config.DEVICE` to `cuda` or `cpu`.
 
-Run from the repository root:
+## Main workflows
+
+### Training
 
 ```bash
 python Main.py
 ```
 
-Training behavior, agent selection, reward weights, and environment settings are configured in:
+Most settings live in `Config.py`.
+You can switch benchmark agents with flags such as `USE_INDEPENDENT_DDPG`, `USE_SHARED_OBS_DDPG`, and `USE_SHARED_OBS_SAC`. If all of them are `False`, the default trainer is MADDPG.
 
-- `Config.py`
+### Evaluate a saved model
 
-To switch methods, update the boolean flags in `Config.py` (e.g., `USE_MILP`, `USE_INDEPENDENT_DDPG`, `USE_SHARED_OBS_DDPG`, `USE_SHARED_OBS_SAC`, `REGULAR_MADDPG`).
-
-## 📊 Methodology (High Level)
-
-1. Simulate EV arrivals, dwell time, SoC dynamics, and balancing-market demand in `environment/EVEnv.py`.
-2. Train agents with replay-based off-policy learning in `training/train.py`.
-3. Combine local EV-serving objectives and global balancing objectives through hierarchical value learning and reward design.
-4. Compare with benchmark controllers (MILP and alternative RL baselines).
-
-## 📚 Notes
-
-- Results and logs are generated during training and can be visualized via utilities under `tools/`.
-- For reproducible experiments, keep seeds and flags fixed in `Config.py`.
-
-```bibtex
-@article{Hayashi2026EVVPP,
-  title={Hierarchical Multi-Agent Reinforcement Learning Control for EV-VPP in Balancing Markets},
-  author={Hayashi, Koshin and Xue, Sihui and Kodaira, Daisuke},
-  journal={Submitted to IEEE Access},
-  year={2026}
-}
-
+```bash
+python -m tools.execute
 ```
+
+### TensorBoard
+
+```bash
+python -m tools.runtensorboard
+```
+
+## Notes
+
+- **MILP solver options**: In this project, PuLP CBC options such as `gapRel` / `gapAbs` are passed through `options=["-ratio ..."]` style arguments for compatibility.
+- **`MAX_EV_PER_STATION` consistency**: Components such as `LocalEvMLPCritic` and `normalize.py` assume the same `Config.MAX_EV_PER_STATION`. Changing it mid-run or mismatching shapes can cause dimension errors.
+- **Permutation invariance**: The actor and local critic are designed to be insensitive to the order of EV slots by using a DeepSets-style encoder. This makes training robust to EV index ordering.

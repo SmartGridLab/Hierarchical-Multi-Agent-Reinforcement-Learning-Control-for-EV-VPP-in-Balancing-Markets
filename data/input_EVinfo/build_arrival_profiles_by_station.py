@@ -1,6 +1,6 @@
 
 
-"Documentation."
+"""Build one per-station arrival-count profile from raw charging sessions."""
 
 from __future__ import annotations 
 
@@ -36,12 +36,12 @@ def _parse_args ()->Args :
     Path ("input_EVinfo")
     /"Electric_Vehicle_Charging_Station_Data_-8671638762898357044.csv"
     ),
-    help ="Text.",
+    help ="Raw charging-session CSV exported from the station dataset.",
     )
     p .add_argument (
     "--out-dir",
     default =str (Path ("input_EVinfo")/"arrivals_by_station"),
-    help ="Text.",
+    help ="Directory where one Arrival__<station>.csv file is written per station.",
     )
     p .add_argument ("--episode-steps",type =int ,default =EPISODE_STEPS_DEFAULT )
     p .add_argument ("--step-minutes",type =int ,default =STEP_MINUTES_DEFAULT )
@@ -74,7 +74,7 @@ def _sanitize_filename (name :str )->str :
 
 
 def _parse_start_dt (raw :str )->datetime |None :
-    "Documentation."
+    """Parse the session start timestamp used by the source CSV."""
     if not raw :
         return None 
     s =raw .strip ()
@@ -117,10 +117,10 @@ def main ()->None :
     with in_path .open (newline ="",encoding ="utf-8-sig")as f :
         reader =csv .DictReader (f )
         if reader .fieldnames is None :
-            raise ValueError ("Error: invalid runtime state.")
+            raise ValueError (f"CSV has no header: {in_path}")
         for need in (args .station_col ,args .start_dt_col ):
             if need not in reader .fieldnames :
-                raise ValueError ("Error: invalid runtime state.")
+                raise ValueError (f"Required column not found in {in_path}: {need}")
 
         for row in reader :
             total_rows +=1 
@@ -165,4 +165,3 @@ def main ()->None :
 
 if __name__ =="__main__":
     main ()
-

@@ -1,6 +1,6 @@
 
 
-"Documentation."
+"""Build a 288-step arrival profile from transaction start timestamps."""
 
 from __future__ import annotations 
 
@@ -29,30 +29,30 @@ def _parse_args ()->Args :
     p .add_argument (
     "--input",
     default =str (Path (__file__ ).resolve ().parent /"transactions.csv"),
-    help ="Text.",
+    help ="Input transactions CSV with a start_timestamp column.",
     )
     p .add_argument (
     "--output",
     default =str (Path (__file__ ).resolve ().parent /"Arrival_from_transactions.csv"),
-    help ="Text.",
+    help ="Output arrival profile CSV path.",
     )
     p .add_argument (
     "--episode-steps",
     type =int ,
     default =EPISODE_STEPS_DEFAULT ,
-    help ="Text.",
+    help ="Number of discrete steps in one episode.",
     )
     p .add_argument (
     "--step-minutes",
     type =int ,
     default =STEP_MINUTES_DEFAULT ,
-    help ="Text.",
+    help ="Minutes represented by one episode step.",
     )
     p .add_argument (
     "--tz-offset-min",
     type =int ,
     default =0 ,
-    help ="Text.",
+    help ="Timezone offset in minutes applied before binning timestamps by time of day.",
     )
     ns =p .parse_args ()
     return Args (
@@ -65,7 +65,7 @@ def _parse_args ()->Args :
 
 
 def _parse_iso8601_z (ts :str )->datetime |None :
-    "Documentation."
+    """Parse an ISO-8601 timestamp, accepting the common trailing-Z UTC form."""
     if not ts :
         return None 
     s =ts .strip ()
@@ -99,7 +99,7 @@ tz_offset_min :int ,
             raise ValueError ("Error: invalid runtime state.")
         if "start_timestamp"not in reader .fieldnames :
             raise ValueError (
-            "Text."
+            f"Required column not found in {input_csv}: start_timestamp"
             )
 
         total =0 
@@ -149,4 +149,3 @@ def main ()->None :
 
 if __name__ =="__main__":
     main ()
-

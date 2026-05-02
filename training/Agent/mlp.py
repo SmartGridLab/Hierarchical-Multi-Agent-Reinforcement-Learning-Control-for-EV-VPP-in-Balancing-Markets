@@ -1,12 +1,24 @@
-import torch 
-import torch .nn as nn 
+"""
+
+
+- LocalEvMLPCritic:
+
+- GlobalMLPCritic:
+
+"""
+import torch
+import torch .nn as nn
 from Config import (
 LOCAL_CRITIC_HIDDEN_SIZE ,
 GLOBAL_CRITIC_HIDDEN_SIZE ,
 MAX_EV_PER_STATION ,
+MIXER_B_MAX ,
+MIXER_B_MAX_ENABLE ,
 )
 from environment.observation_config import (
+EV_FEAT_DIM ,
 LOCAL_DEMAND_STEPS ,
+LOCAL_TAIL_DIM ,
 GLOBAL_DEMAND_STEPS ,
 )
 
@@ -18,7 +30,7 @@ class LocalEvMLPCritic (nn .Module ):
         self .a_dim =a_dim 
         self .max_evs =max_evs 
         self .hid =hid 
-        self .station_state_dim =station_state_dim if station_state_dim is not None else (ev_feat_dim *max_evs +4 )
+        self .station_state_dim =station_state_dim if station_state_dim is not None else (ev_feat_dim *max_evs +LOCAL_TAIL_DIM )
         self .init_gain =init_gain 
 
         additional_features =1 +1 +int (LOCAL_DEMAND_STEPS )
@@ -103,7 +115,7 @@ class GlobalMLPCritic (nn .Module ):
         self .a_dim =a_dim 
         self .n_agent =n_agent 
         self .hid =hid 
-        self .ev_features_per_station =4 *MAX_EV_PER_STATION 
+        self .ev_features_per_station =EV_FEAT_DIM *MAX_EV_PER_STATION
         self .station_state_dim =self .ev_features_per_station 
         self .init_gain =init_gain 
 
@@ -194,9 +206,15 @@ class GlobalMLPCritic (nn .Module ):
 
         w =self .mixer_w (common_features )
         w =self .softplus (w )
-        b =self .mixer_b (common_features )
+        b_raw =self .mixer_b (common_features )
+        # Scaled tanh: b = K * tanh(b_raw / K). Same ±K output range as the
+        # naive form but ∂b/∂b_raw ≈ 1 near zero (no gradient amplification).
+        if MIXER_B_MAX_ENABLE :
+            b =MIXER_B_MAX *torch .tanh (b_raw /MIXER_B_MAX )
+        else :
+            b =b_raw
 
-        q_global =(w *u ).mean (dim =1 ,keepdim =True )+b 
+        q_global =(w *u ).mean (dim =1 ,keepdim =True )+b
 
         if not torch .isfinite (q_global ).all ():
             q_global =torch .nan_to_num (q_global ,nan =0.0 ,posinf =0.0 ,neginf =0.0 )
